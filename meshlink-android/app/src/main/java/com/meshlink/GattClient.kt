@@ -1,0 +1,210 @@
+package com.meshlink
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothProfile
+import android.content.Context
+import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
+
+interface GattClientListener {
+    fun onPeerHandshakeComplete(device: BluetoothDevice, remoteBeaconId: Int, sharedSecret: ByteArray)
+    fun onPeerDisconnected(device: BluetoothDevice)
+    fun onMessageReceived(device: BluetoothDevice, data: ByteArray)
+    fun onHandshakeFailed(device: BluetoothDevice, reason: String)
+}
+
+class GattClient(
+    private val context: Context,
+    private val listener: GattClientListener,
+    private val identityKey: uniffi.meshlink_core.IdentityKeyPair
+) {
+    var localBeaconId: Int = 0
+    private val clientEphemeralKeys = ConcurrentHashMap<String, uniffi.meshlink_core.EphemeralKeyPair>()
+    private val sharedSecrets = ConcurrentHashMap<String, ByteArray>()
+    companion object {
+        private const val TAG = "GattClient"
+        private const val MAX_CONNECTIONS = 5 // FR-2.1.5
+    }
+
+    private val connections = ConcurrentHashMap<String, BluetoothGatt>()
+
+    @SuppressLint("MissingPermission")
+    fun connectToPeer(device: BluetoothDevice) {
+        if (connections.size >= MAX_CONNECTIONS && !connections.containsKey(device.address)) {
+            Log.w(TAG, "Max connections reached, dropping connect to ${device.address}")
+            return
+        }
+        if (connections.containsKey(device.address)) {
+            return
+        }
+        
+        Log.i(TAG, "Connecting to ${device.address}")
+        val gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        if (gatt != null) {
+            connections[device.address] = gatt
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun disconnect(deviceAddress: String) {
+        connections.remove(deviceAddress)?.let {
+            it.disconnect()
+            it.close()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun disconnectAll() {
+        connections.values.forEach { 
+            it.disconnect()
+            it.close()
+        }
+        connections.clear()
+    }
+
+    @SuppressLint("MissingPermission")
+    fun sendMessage(deviceAddress: String, data: ByteArray) {
+        val gatt = connections[deviceAddress] ?: return
+        val service = gatt.getService(RelayService.MESHLINK_SERVICE_UUID.uuid) ?: return
+        val char = service.getCharacteristic(GattServer.MESSAGE_CHAR_UUID) ?: return
+        val secret = sharedSecrets[deviceAddress] ?: return
+
+        val encrypted = uniffi.meshlink_core.encryptTransport(secret, ByteArray(12) { 0 }, data)
+        val mtu = 500
+        val chunks = encrypted.toList().chunked(mtu)
+        val totalChunks = chunks.size
+        
+        chunks.forEachIndexed { index, chunk ->
+            val payload = ByteArray(2 + chunk.size)
+            payload[0] = index.toByte()
+            payload[1] = totalChunks.toByte()
+            System.arraycopy(chunk.toByteArray(), 0, payload, 2, chunk.size)
+            
+            char.value = payload
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            gatt.writeCharacteristic(char)
+        }
+    }
+
+
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            val device = gatt.device
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                Log.i(TAG, "Connected to ${device.address}")
+                val requested = gatt.requestMtu(512)
+                if (!requested) {
+                    gatt.discoverServices()
+                }
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                Log.i(TAG, "Disconnected from ${device.address}")
+                connections.remove(device.address)
+                gatt.close()
+                listener.onPeerDisconnected(device)
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "MTU changed to $mtu, discovering services...")
+                gatt.discoverServices()
+            } else {
+                gatt.discoverServices() // Try anyway
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                val service = gatt.getService(RelayService.MESHLINK_SERVICE_UUID.uuid)
+                if (service != null) {
+                    val versionChar = service.getCharacteristic(GattServer.VERSION_CHAR_UUID)
+                    if (versionChar != null) {
+                        gatt.readCharacteristic(versionChar)
+                    } else {
+                        listener.onHandshakeFailed(gatt.device, "VERSION_CHAR not found")
+                        disconnect(gatt.device.address)
+                    }
+                } else {
+                    listener.onHandshakeFailed(gatt.device, "MeshLink Service not found")
+                    disconnect(gatt.device.address)
+                }
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int
+        ) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                when (characteristic.uuid) {
+                    GattServer.VERSION_CHAR_UUID -> {
+                        val version = characteristic.value?.firstOrNull()
+                        if (version == GattServer.PROTOCOL_VERSION) {
+                            val beaconChar = gatt.getService(RelayService.MESHLINK_SERVICE_UUID.uuid)
+                                ?.getCharacteristic(GattServer.BEACON_CHAR_UUID)
+                            if (beaconChar != null) {
+                                val ephemeralKey = uniffi.meshlink_core.EphemeralKeyPair.generate()
+                                clientEphemeralKeys[gatt.device.address] = ephemeralKey
+                                val payload = uniffi.meshlink_core.createHandshakePayload(localBeaconId.toUInt(), identityKey, ephemeralKey)
+                                beaconChar.value = uniffi.meshlink_core.serializeHandshake(payload)
+                                beaconChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                                gatt.writeCharacteristic(beaconChar)
+                            }
+                        } else {
+                            listener.onHandshakeFailed(gatt.device, "Incompatible protocol version")
+                            disconnect(gatt.device.address)
+                        }
+                    }
+                    GattServer.BEACON_CHAR_UUID -> {
+                        val value = characteristic.value
+                        if (value != null && value.isNotEmpty()) {
+                            try {
+                                val serverPayload = uniffi.meshlink_core.deserializeHandshake(value)
+                                if (uniffi.meshlink_core.verifyHandshakePayload(serverPayload)) {
+                                    val ephemeralKey = clientEphemeralKeys[gatt.device.address]
+                                    if (ephemeralKey != null) {
+                                        val sharedSecret = ephemeralKey.computeSharedSecret(serverPayload.ephemeralPubKey)
+                                        sharedSecrets[gatt.device.address] = sharedSecret
+                                        listener.onPeerHandshakeComplete(gatt.device, serverPayload.beaconId.toInt(), sharedSecret)
+                                    }
+                                } else {
+                                    listener.onHandshakeFailed(gatt.device, "Server handshake verification failed")
+                                }
+                            } catch(e: Exception) {
+                                listener.onHandshakeFailed(gatt.device, "Invalid handshake payload")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+                @SuppressLint("MissingPermission")
+        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == GattServer.BEACON_CHAR_UUID) {
+                val beaconChar = gatt.getService(RelayService.MESHLINK_SERVICE_UUID.uuid)
+                    ?.getCharacteristic(GattServer.BEACON_CHAR_UUID)
+                if (beaconChar != null) {
+                    gatt.readCharacteristic(beaconChar)
+                }
+            }
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic
+        ) {
+            if (characteristic.uuid == GattServer.MESSAGE_CHAR_UUID) {
+                val data = characteristic.value ?: return
+                listener.onMessageReceived(gatt.device, data)
+            }
+        }
+    }
+}
