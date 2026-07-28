@@ -256,7 +256,10 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     }
     
     fun sendMessageToPeer(address: String, message: String) {
-        val peerId = peerManager.getPeer(address)?.beaconId ?: return
+        val peer = peerManager.getPeer(address)
+        val peerId = peer?.beaconId ?: return
+        val isConnected = peer.isConnected
+        
         val envelope = uniffi.meshlink_core.createEnvelope(
             senderId = localBeaconId.toUInt(),
             recipientId = peerId.toUInt(),
@@ -278,14 +281,18 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                     envelopeData = serialized,
                     timestamp = System.currentTimeMillis(),
                     direction = "OUTBOUND",
-                    status = "SENT",
+                    status = if (isConnected) "SENT" else "PENDING_RELAY",
                     isBroadcast = false
                 ))
             }
         }
 
-        gattClient.sendMessage(address, serialized)
-        Log.d(TAG, "Sent message to $address")
+        if (isConnected) {
+            gattClient.sendMessage(address, serialized)
+            Log.d(TAG, "Sent message to $address")
+        } else {
+            Log.d(TAG, "Peer $address is not connected. Message queued for relay.")
+        }
     }
 
     fun broadcastMessage(message: String) {
@@ -337,6 +344,20 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             peerManager.addPeer(device.address, beaconId, sharedSecret)
             Log.i(TAG, "Handshake complete (server side) with ${device.address}, beacon $beaconId")
             broadcastPeerConnected(device.address, beaconId)
+            
+            // Send my username if configured
+            val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
+            val myName = prefs.getString("username", "")
+            if (!myName.isNullOrBlank()) {
+                val intent = Intent(this, RelayService::class.java).apply {
+                    action = "SEND_MESSAGE"
+                    putExtra("address", device.address)
+                    putExtra("message", "__SYS_NAME__:$myName")
+                }
+                startService(intent)
+            }
+
+            flushPendingMessages(beaconId.toLong(), device.address)
         }
         
         // Ensure symmetric connection so we can send messages back

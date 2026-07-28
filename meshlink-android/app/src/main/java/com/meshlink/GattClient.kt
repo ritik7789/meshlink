@@ -35,6 +35,8 @@ class GattClient(
     }
 
     private val connections = ConcurrentHashMap<String, BluetoothGatt>()
+    private val pendingConnections = ConcurrentHashMap<String, BluetoothGatt>()
+    private val connectionHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     @SuppressLint("MissingPermission")
     fun connectToPeer(device: BluetoothDevice) {
@@ -42,19 +44,36 @@ class GattClient(
             Log.w(TAG, "Max connections reached, dropping connect to ${device.address}")
             return
         }
-        if (connections.containsKey(device.address)) {
+        if (connections.containsKey(device.address) || pendingConnections.containsKey(device.address)) {
             return
         }
         
         Log.i(TAG, "Connecting to ${device.address}")
         val gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         if (gatt != null) {
-            connections[device.address] = gatt
+            pendingConnections[device.address] = gatt
+            
+            // 10 second connection timeout
+            connectionHandler.postDelayed({
+                if (pendingConnections.containsKey(device.address)) {
+                    Log.e(TAG, "Connection timeout to ${device.address}, aborting.")
+                    pendingConnections.remove(device.address)?.let {
+                        it.disconnect()
+                        it.close()
+                    }
+                    // Trigger disconnect callback to start exponential backoff
+                    listener.onPeerDisconnected(device)
+                }
+            }, 10000)
         }
     }
 
     @SuppressLint("MissingPermission")
     fun disconnect(deviceAddress: String) {
+        pendingConnections.remove(deviceAddress)?.let {
+            it.disconnect()
+            it.close()
+        }
         connections.remove(deviceAddress)?.let {
             it.disconnect()
             it.close()
@@ -154,36 +173,51 @@ class GattClient(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             val device = gatt.device
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.i(TAG, "Connected to ${device.address}")
-                reconnectAttempts.remove(device.address) // Reset retry counter on success
-                val requested = gatt.requestMtu(512)
-                if (!requested) {
-                    gatt.discoverServices()
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.i(TAG, "Connected to ${device.address}")
+                    pendingConnections.remove(device.address)
+                    connections[device.address] = gatt
+                    reconnectAttempts.remove(device.address) // Reset retry counter on success
+                    val requested = gatt.requestMtu(512)
+                    if (!requested) {
+                        gatt.discoverServices()
+                    }
+                } else {
+                    Log.w(TAG, "Connection failed with status $status to ${device.address}")
+                    gatt.close()
+                    pendingConnections.remove(device.address)
+                    listener.onPeerDisconnected(device)
+                    scheduleReconnect(device)
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "Disconnected from ${device.address} (status=$status)")
                 connections.remove(device.address)
+                pendingConnections.remove(device.address)
                 writeQueues.remove(device.address)
                 writeInProgress.remove(device.address)
                 gatt.close()
                 listener.onPeerDisconnected(device)
                 
                 // Auto-reconnect with exponential backoff
-                // Status 133 = common Android GATT error, also retry on those
-                val attempts = reconnectAttempts.getOrDefault(device.address, 0)
-                if (attempts < MAX_RECONNECT_ATTEMPTS) {
-                    val delayMs = (Math.min(2000L * (1L shl attempts), 60000L)) // 2s, 4s, 8s, 16s, 32s, max 60s
-                    reconnectAttempts[device.address] = attempts + 1
-                    Log.i(TAG, "Scheduling reconnect #${attempts + 1} to ${device.address} in ${delayMs}ms")
-                    reconnectHandler.postDelayed({
-                        if (!connections.containsKey(device.address)) {
-                            connectToPeer(device)
-                        }
-                    }, delayMs)
-                } else {
-                    Log.w(TAG, "Max reconnect attempts reached for ${device.address}")
-                    reconnectAttempts.remove(device.address)
-                }
+                scheduleReconnect(device)
+            }
+        }
+        
+        @SuppressLint("MissingPermission")
+        private fun scheduleReconnect(device: BluetoothDevice) {
+            val attempts = reconnectAttempts.getOrDefault(device.address, 0)
+            if (attempts < MAX_RECONNECT_ATTEMPTS) {
+                val delayMs = (Math.min(2000L * (1L shl attempts), 60000L)) // 2s, 4s, 8s, 16s, 32s, max 60s
+                reconnectAttempts[device.address] = attempts + 1
+                Log.i(TAG, "Scheduling reconnect #${attempts + 1} to ${device.address} in ${delayMs}ms")
+                reconnectHandler.postDelayed({
+                    if (!connections.containsKey(device.address) && !pendingConnections.containsKey(device.address)) {
+                        connectToPeer(device)
+                    }
+                }, delayMs)
+            } else {
+                Log.w(TAG, "Max reconnect attempts reached for ${device.address}")
+                reconnectAttempts.remove(device.address)
             }
         }
 
