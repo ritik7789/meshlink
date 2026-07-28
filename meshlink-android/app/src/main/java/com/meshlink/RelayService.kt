@@ -145,13 +145,18 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         serviceData[3] = (localBeaconId shr 8).toByte()
         serviceData[4] = localBeaconId.toByte()
 
-        val data = AdvertiseData.Builder()
+        // Place UUID in main packet (to trigger scanners)
+        val advertiseData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(MESHLINK_SERVICE_UUID)
+            .build()
+
+        // Place custom data in Scan Response to prevent 31-byte overflow on strict OEMs (Realme/Honor/Lenovo)
+        val scanResponseData = AdvertiseData.Builder()
             .addServiceData(MESHLINK_SERVICE_UUID, serviceData)
             .build()
 
-        bleAdvertiser?.startAdvertising(settings, data, advertiseCallback)
+        bleAdvertiser?.startAdvertising(settings, advertiseData, scanResponseData, advertiseCallback)
         isAdvertising = true
         Log.i(TAG, "Started BLE Advertising.")
     }
@@ -161,7 +166,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         // No hardware-level filter — some devices (Realme, Oppo) ignore UUID filters
         // when GATT connections are active. We filter manually in the callback.
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY) // Use low latency to guarantee Active Scanning for Scan Response
             .build()
 
         bleScanner?.startScan(null, settings, scanCallback)
