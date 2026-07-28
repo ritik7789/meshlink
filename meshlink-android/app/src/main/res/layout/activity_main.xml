@@ -3,138 +3,74 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="#1E1E24"
-    android:padding="16dp">
+    android:background="#17212B"
+    android:orientation="vertical">
 
-    <!-- Header Card -->
-    <androidx.cardview.widget.CardView
+    <!-- Top Bar -->
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        app:cardBackgroundColor="#282A36"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="4dp"
-        android:layout_marginBottom="16dp">
-        
-        <LinearLayout
-            android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="#1E2C3A"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="16dp">
-            
-            <TextView
-                android:id="@+id/tvHeader"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="MeshLink Active"
-                android:textColor="#F8F8F2"
-                android:textSize="20sp"
-                android:textStyle="bold"/>
+            android:text="MeshLink"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <View
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/bg_avatar"
+                android:backgroundTint="#4DCA59" />
 
             <TextView
                 android:id="@+id/tvStatus"
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="0 peers connected"
-                android:textColor="#6272A4"
-                android:textSize="14sp"
-                android:layout_marginTop="4dp"/>
+                android:layout_marginStart="6dp"
+                android:text="0 peers online"
+                android:textColor="#8E9BA7"
+                android:textSize="12sp" />
         </LinearLayout>
-    </androidx.cardview.widget.CardView>
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Connected Peers"
-        android:textColor="#6272A4"
-        android:textSize="14sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp"/>
-
-    <!-- Peers List (Horizontal Scroll or Vertical inside constrained height) -->
-    <ScrollView
-        android:layout_width="match_parent"
-        android:layout_height="120dp"
-        android:layout_marginBottom="16dp">
-        
-        <LinearLayout
-            android:id="@+id/llPeersContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"/>
-    </ScrollView>
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Chat Log"
-        android:textColor="#6272A4"
-        android:textSize="14sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp"/>
-
-    <!-- Chat Log -->
-    <ScrollView
-        android:id="@+id/svChatLog"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginBottom="16dp"
-        android:background="@android:color/transparent">
-        
-        <LinearLayout
-            android:id="@+id/llChatLog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"/>
-    </ScrollView>
-
-    <!-- Input Area -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginBottom="8dp">
-
-        <EditText
-            android:id="@+id/etMessage"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:background="#282A36"
-            android:textColor="#F8F8F2"
-            android:textColorHint="#6272A4"
-            android:hint="Type a message..."
-            android:padding="12dp"
-            android:inputType="text"/>
-
     </LinearLayout>
 
-    <LinearLayout
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:layout_height="match_parent">
 
-        <Button
-            android:id="@+id/btnSendSelected"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Send to Selected"
-            android:textColor="#FFFFFF"
-            android:backgroundTint="#6272A4"
-            android:layout_marginEnd="4dp"/>
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvConversations"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="80dp" />
 
-        <Button
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
             android:id="@+id/btnBroadcast"
-            android:layout_width="0dp"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Broadcast to All"
-            android:textColor="#FFFFFF"
-            android:backgroundTint="#FF5555"
-            android:layout_marginStart="4dp"/>
-    </LinearLayout>
-
+            android:layout_gravity="bottom|end"
+            android:layout_margin="16dp"
+            android:backgroundTint="#6C9ECF"
+            android:src="@drawable/ic_broadcast"
+            app:tint="#FFFFFF" />
+    </FrameLayout>
 </LinearLayout>

@@ -6,15 +6,21 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.Gravity
-import android.view.View
-import android.widget.*
+import android.widget.EditText
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.meshlink.db.AppDatabase
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -23,15 +29,13 @@ class MainActivity : AppCompatActivity() {
     private val PERMISSION_REQUEST_CODE = 100
     
     private lateinit var tvStatus: TextView
-    private lateinit var llPeersContainer: LinearLayout
-    private lateinit var llChatLog: LinearLayout
-    private lateinit var svChatLog: ScrollView
-    private lateinit var etMessage: EditText
-    private lateinit var btnSendSelected: Button
-    private lateinit var btnBroadcast: Button
+    private lateinit var rvConversations: RecyclerView
+    private lateinit var btnBroadcast: FloatingActionButton
     
+    private lateinit var conversationAdapter: ConversationAdapter
     private val connectedPeers = mutableMapOf<String, Int>()
-    private var selectedPeer: String? = null
+    
+    private val db by lazy { AppDatabase.getDatabase(this) }
 
     private val serviceReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -40,27 +44,15 @@ class MainActivity : AppCompatActivity() {
                     val address = intent.getStringExtra(RelayService.EXTRA_PEER_ADDRESS) ?: return
                     val beaconId = intent.getIntExtra(RelayService.EXTRA_BEACON_ID, 0)
                     connectedPeers[address] = beaconId
-                    updatePeersUI()
-                    appendLog("System", "Connected to $address (Beacon: $beaconId)")
+                    updateUI()
                 }
                 RelayService.ACTION_PEER_DISCONNECTED -> {
                     val address = intent.getStringExtra(RelayService.EXTRA_PEER_ADDRESS) ?: return
                     connectedPeers.remove(address)
-                    if (selectedPeer == address) {
-                        selectedPeer = null
-                    }
-                    updatePeersUI()
-                    appendLog("System", "Disconnected from $address")
+                    updateUI()
                 }
                 RelayService.ACTION_MESSAGE_RECEIVED -> {
-                    val address = intent.getStringExtra(RelayService.EXTRA_PEER_ADDRESS)
-                    val message = intent.getStringExtra(RelayService.EXTRA_MESSAGE_DATA)
-                    val senderBeacon = intent.getIntExtra("extra_sender_beacon", -1)
-                    
-                    val sender = if (senderBeacon != -1) "Beacon $senderBeacon" else (address ?: "Unknown")
-                    if (message != null) {
-                        appendLog(sender, message)
-                    }
+                    loadConversations()
                 }
             }
         }
@@ -71,15 +63,26 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         
         tvStatus = findViewById(R.id.tvStatus)
-        llPeersContainer = findViewById(R.id.llPeersContainer)
-        llChatLog = findViewById(R.id.llChatLog)
-        svChatLog = findViewById(R.id.svChatLog)
-        etMessage = findViewById(R.id.etMessage)
-        btnSendSelected = findViewById(R.id.btnSendSelected)
+        rvConversations = findViewById(R.id.rvConversations)
         btnBroadcast = findViewById(R.id.btnBroadcast)
 
-        btnSendSelected.setOnClickListener { sendMessage() }
-        btnBroadcast.setOnClickListener { broadcastMessage() }
+        conversationAdapter = ConversationAdapter(
+            onConversationClick = { address, peerId ->
+                val intent = Intent(this, ChatActivity::class.java).apply {
+                    putExtra("peer_address", address)
+                    putExtra("peer_beacon_id", peerId)
+                }
+                startActivity(intent)
+            },
+            onConversationLongClick = { peerId ->
+                showDeleteConversationDialog(peerId)
+            }
+        )
+        
+        rvConversations.layoutManager = LinearLayoutManager(this)
+        rvConversations.adapter = conversationAdapter
+
+        btnBroadcast.setOnClickListener { showBroadcastDialog() }
 
         checkAndRequestPermissions()
     }
@@ -102,121 +105,71 @@ class MainActivity : AppCompatActivity() {
         }
         startService(syncIntent)
         
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            val db = com.meshlink.db.AppDatabase.getDatabase(this@MainActivity)
-            val messages = db.messageDao().getAllMessages()
-            
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                llChatLog.removeAllViews()
-                messages.forEach { entity ->
-                    try {
-                        val env = uniffi.meshlink_core.deserializeEnvelope(entity.envelopeData)
-                        appendLog("Beacon ${env.senderId}", env.encryptedPayload, isLocal = env.senderId.toInt() == 0) // Approximation
-                    } catch(e: Exception) {}
-                }
-            }
-        }
+        loadConversations()
     }
 
     override fun onStop() {
         super.onStop()
         unregisterReceiver(serviceReceiver)
     }
-
-    private fun updatePeersUI() {
-        tvStatus.text = "${connectedPeers.size} peers connected"
-        
-        llPeersContainer.removeAllViews()
-        for ((address, beaconId) in connectedPeers) {
-            val peerView = TextView(this).apply {
-                text = "Beacon: $beaconId\n$address"
-                textSize = 14f
-                setTextColor(Color.parseColor("#F8F8F2"))
-                setPadding(24, 24, 24, 24)
-                
-                val bg = if (address == selectedPeer) "#6272A4" else "#282A36"
-                setBackgroundColor(Color.parseColor(bg))
-                
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    setMargins(0, 0, 0, 8)
-                }
-
-                setOnClickListener {
-                    selectedPeer = address
-                    updatePeersUI()
-                }
-            }
-            llPeersContainer.addView(peerView)
-        }
-    }
-
-    private fun appendLog(sender: String, msg: String, isLocal: Boolean = false) {
-        val bubble = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val bg = if (sender == "System") "#44475A" else if (isLocal) "#50FA7B" else "#8BE9FD"
-            val textCol = if (isLocal || sender != "System") "#282A36" else "#F8F8F2"
+    
+    private fun loadConversations() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val conversations = db.messageDao().getConversationList()
             
-            setBackgroundColor(Color.parseColor(bg))
-            setPadding(24, 16, 24, 16)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                setMargins(0, 8, 0, 8)
-                gravity = if (isLocal) Gravity.END else Gravity.START
+            withContext(Dispatchers.Main) {
+                conversationAdapter.setConversations(conversations)
             }
-
-            val senderView = TextView(context).apply {
-                text = sender
-                textSize = 12f
-                setTextColor(Color.parseColor(textCol))
-                alpha = 0.8f
+            
+            // Load unread counts
+            conversations.forEach {
+                val peerId = if (it.direction == "OUTBOUND") it.recipientId else it.senderId
+                val unread = db.messageDao().getUnreadCount(peerId)
+                withContext(Dispatchers.Main) {
+                    conversationAdapter.setUnreadCount(peerId, unread)
+                }
             }
-            val msgView = TextView(context).apply {
-                text = msg
-                textSize = 16f
-                setTextColor(Color.parseColor(textCol))
-            }
-            addView(senderView)
-            addView(msgView)
-        }
-        llChatLog.addView(bubble)
-        svChatLog.post { svChatLog.fullScroll(ScrollView.FOCUS_DOWN) }
-    }
-
-    private fun sendMessage() {
-        val target = selectedPeer
-        val text = etMessage.text.toString()
-        if (target != null && text.isNotBlank()) {
-            val intent = Intent(this, RelayService::class.java).apply {
-                action = "SEND_MESSAGE"
-                putExtra("address", target)
-                putExtra("message", text)
-            }
-            startService(intent)
-            appendLog("Me to $target", text, isLocal = true)
-            etMessage.text.clear()
-        } else {
-            Toast.makeText(this, "Select a peer and type a message", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun broadcastMessage() {
-        val text = etMessage.text.toString()
-        if (text.isNotBlank()) {
-            val intent = Intent(this, RelayService::class.java).apply {
-                action = "BROADCAST_MESSAGE"
-                putExtra("message", text)
+    private fun updateUI() {
+        tvStatus.text = "${connectedPeers.size} peers online"
+        conversationAdapter.setOnlinePeers(connectedPeers)
+        loadConversations()
+    }
+
+    private fun showBroadcastDialog() {
+        val input = EditText(this)
+        AlertDialog.Builder(this)
+            .setTitle("Broadcast Message")
+            .setView(input)
+            .setPositiveButton("Send") { _, _ ->
+                val text = input.text.toString()
+                if (text.isNotBlank()) {
+                    val intent = Intent(this, RelayService::class.java).apply {
+                        action = "BROADCAST_MESSAGE"
+                        putExtra("message", text)
+                    }
+                    startService(intent)
+                    Toast.makeText(this, "Broadcast sent", Toast.LENGTH_SHORT).show()
+                }
             }
-            startService(intent)
-            appendLog("Me (Broadcast)", text, isLocal = true)
-            etMessage.text.clear()
-        } else {
-            Toast.makeText(this, "Type a message to broadcast", Toast.LENGTH_SHORT).show()
-        }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showDeleteConversationDialog(peerId: Long) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete Conversation")
+            .setMessage("Are you sure you want to delete this conversation?")
+            .setPositiveButton("Delete") { _, _ ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    db.messageDao().deleteConversation(peerId)
+                    loadConversations()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun checkAndRequestPermissions() {
@@ -264,6 +217,5 @@ class MainActivity : AppCompatActivity() {
         } else {
             startService(serviceIntent)
         }
-        appendLog("System", "MeshLink Service started")
     }
 }

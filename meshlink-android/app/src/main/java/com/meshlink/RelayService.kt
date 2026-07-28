@@ -116,6 +116,17 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         // Schedule periodic scan restarts to work around Android BLE stack
         // deprioritizing scanning after GATT connections are established
         handler.postDelayed(scanRestartRunnable, 15_000)
+
+        // Schedule periodic dedup cache cleanup (every 5 minutes)
+        handler.postDelayed(dedupCleanupRunnable, 300_000)
+    }
+
+    private val dedupCleanupRunnable = object : Runnable {
+        override fun run() {
+            dedupCache.cleanupExpired(300U) // Purge entries older than 5 minutes
+            Log.d(TAG, "Dedup cache cleanup completed")
+            handler.postDelayed(this, 300_000)
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -250,12 +261,19 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         )
         val serialized = uniffi.meshlink_core.serializeEnvelope(envelope)
         
+        // Save sent message to DB with full metadata
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             val db = com.meshlink.db.AppDatabase.getDatabase(this@RelayService)
             db.messageDao().insertMessage(com.meshlink.db.MessageEntity(
                 messageId = envelope.messageId,
+                senderId = localBeaconId.toLong(),
+                recipientId = peerId.toLong(),
+                plaintext = message,
                 envelopeData = serialized,
-                timestamp = System.currentTimeMillis()
+                timestamp = System.currentTimeMillis(),
+                direction = "OUTBOUND",
+                status = "SENT",
+                isBroadcast = false
             ))
         }
 
@@ -272,7 +290,23 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             payloadType = uniffi.meshlink_core.PayloadType.TEXT
         )
         val outBytes = uniffi.meshlink_core.serializeEnvelope(envelope)
-        
+
+        // Save broadcast message to DB
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            val db = com.meshlink.db.AppDatabase.getDatabase(this@RelayService)
+            db.messageDao().insertMessage(com.meshlink.db.MessageEntity(
+                messageId = envelope.messageId,
+                senderId = localBeaconId.toLong(),
+                recipientId = 0L,
+                plaintext = message,
+                envelopeData = outBytes,
+                timestamp = System.currentTimeMillis(),
+                direction = "OUTBOUND",
+                status = "SENT",
+                isBroadcast = true
+            ))
+        }
+
         peerManager.getConnectedPeers().forEach { peer ->
             gattClient.sendMessage(peer.address, outBytes)
         }
@@ -310,18 +344,40 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
         val action = uniffi.meshlink_core.processIncoming(envelope, localBeaconId.toUInt(), dedupCache)
         when (action) {
-            uniffi.meshlink_core.ProcessAction.DELIVER_LOCAL -> {
+            uniffi.meshlink_core.ProcessAction.DELIVER_LOCAL, 
+            uniffi.meshlink_core.ProcessAction.DELIVER_AND_RELAY -> {
                 Log.i(TAG, "Delivering local message from ${device.address}")
+                val isBroadcast = envelope.priority == uniffi.meshlink_core.Priority.BROADCAST
+                val plaintext = envelope.encryptedPayload // Currently plaintext in envelope
+
+                // Save received message to DB
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    val db = com.meshlink.db.AppDatabase.getDatabase(this@RelayService)
+                    db.messageDao().insertMessage(com.meshlink.db.MessageEntity(
+                        messageId = envelope.messageId,
+                        senderId = envelope.senderId.toLong(),
+                        recipientId = envelope.recipientId.toLong(),
+                        plaintext = plaintext,
+                        envelopeData = data,
+                        timestamp = System.currentTimeMillis(),
+                        direction = "INBOUND",
+                        status = "RECEIVED",
+                        isBroadcast = isBroadcast
+                    ))
+                }
+
+                // Broadcast decrypted plaintext to UI
                 val intent = Intent(ACTION_MESSAGE_RECEIVED).apply {
                     putExtra(EXTRA_PEER_ADDRESS, device.address)
-                    putExtra(EXTRA_MESSAGE_DATA, envelope.encryptedPayload)
+                    putExtra(EXTRA_MESSAGE_DATA, plaintext)
                     putExtra("extra_sender_beacon", envelope.senderId.toInt())
+                    putExtra("extra_is_broadcast", isBroadcast)
                 }
                 intent.setPackage(packageName)
                 sendBroadcast(intent)
                 
-                // If it's a broadcast, we also need to relay it to others
-                if (envelope.priority == uniffi.meshlink_core.Priority.BROADCAST) {
+                // Relay broadcast messages to other peers
+                if (action == uniffi.meshlink_core.ProcessAction.DELIVER_AND_RELAY || isBroadcast) {
                     val updatedEnvelope = uniffi.meshlink_core.decrementTtl(envelope)
                     if (updatedEnvelope != null) {
                         val serialized = uniffi.meshlink_core.serializeEnvelope(updatedEnvelope)
@@ -359,10 +415,23 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             
             Log.i(TAG, "Handshake complete (client side) with ${device.address}, beacon $remoteBeaconId")
             broadcastPeerConnected(device.address, remoteBeaconId)
+
+            // Flush any pending messages for this peer
+            flushPendingMessages(remoteBeaconId.toLong(), device.address)
         }
-        
-        // Always send our beacon ID back so the other side knows who we are
-        
+    }
+
+    /** Flush store-and-forward messages queued for a reconnected peer */
+    private fun flushPendingMessages(peerId: Long, address: String) {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            val db = com.meshlink.db.AppDatabase.getDatabase(this@RelayService)
+            val pending = db.messageDao().getPendingMessagesForPeer(peerId)
+            pending.forEach { msg ->
+                gattClient.sendMessage(address, msg.envelopeData)
+                db.messageDao().updateStatus(msg.messageId, "SENT")
+                Log.d(TAG, "Flushed pending message ${msg.messageId} to $address")
+            }
+        }
     }
 
     override fun onHandshakeFailed(device: BluetoothDevice, reason: String) {

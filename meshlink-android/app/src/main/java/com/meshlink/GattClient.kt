@@ -8,7 +8,9 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.util.Log
+import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 interface GattClientListener {
     fun onPeerHandshakeComplete(device: BluetoothDevice, remoteBeaconId: Int, sharedSecret: ByteArray)
@@ -25,6 +27,8 @@ class GattClient(
     var localBeaconId: Int = 0
     private val clientEphemeralKeys = ConcurrentHashMap<String, uniffi.meshlink_core.EphemeralKeyPair>()
     private val sharedSecrets = ConcurrentHashMap<String, ByteArray>()
+    private val writeQueues = ConcurrentHashMap<String, ConcurrentLinkedQueue<ByteArray>>()
+    private val writeInProgress = ConcurrentHashMap<String, Boolean>()
     companion object {
         private const val TAG = "GattClient"
         private const val MAX_CONNECTIONS = 5 // FR-2.1.5
@@ -68,29 +72,82 @@ class GattClient(
 
     @SuppressLint("MissingPermission")
     fun sendMessage(deviceAddress: String, data: ByteArray) {
-        val gatt = connections[deviceAddress] ?: return
-        val service = gatt.getService(RelayService.MESHLINK_SERVICE_UUID.uuid) ?: return
-        val char = service.getCharacteristic(GattServer.MESSAGE_CHAR_UUID) ?: return
         val secret = sharedSecrets[deviceAddress] ?: return
 
-        val encrypted = uniffi.meshlink_core.encryptTransport(secret, ByteArray(12) { 0 }, data)
+        val nonce = ByteArray(12)
+        SecureRandom().nextBytes(nonce)
+        val encrypted = uniffi.meshlink_core.encryptTransport(secret, nonce, data)
+        val combined = nonce + encrypted
+        
         val mtu = 500
-        val chunks = encrypted.toList().chunked(mtu)
+        val chunks = combined.toList().chunked(mtu)
         val totalChunks = chunks.size
         
+        val queue = writeQueues.getOrPut(deviceAddress) { ConcurrentLinkedQueue() }
         chunks.forEachIndexed { index, chunk ->
             val payload = ByteArray(2 + chunk.size)
             payload[0] = index.toByte()
             payload[1] = totalChunks.toByte()
             System.arraycopy(chunk.toByteArray(), 0, payload, 2, chunk.size)
-            
-            char.value = payload
-            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            gatt.writeCharacteristic(char)
+            queue.add(payload)
+        }
+        
+        if (writeInProgress[deviceAddress] != true) {
+            processNextWrite(deviceAddress)
         }
     }
 
+    @SuppressLint("MissingPermission")
+    fun sendRawEnvelope(deviceAddress: String, envelopeBytes: ByteArray) {
+        val secret = sharedSecrets[deviceAddress] ?: return
 
+        val nonce = ByteArray(12)
+        SecureRandom().nextBytes(nonce)
+        val encrypted = uniffi.meshlink_core.encryptTransport(secret, nonce, envelopeBytes)
+        val combined = nonce + encrypted
+        
+        val mtu = 500
+        val chunks = combined.toList().chunked(mtu)
+        val totalChunks = chunks.size
+        
+        val queue = writeQueues.getOrPut(deviceAddress) { ConcurrentLinkedQueue() }
+        chunks.forEachIndexed { index, chunk ->
+            val payload = ByteArray(2 + chunk.size)
+            payload[0] = index.toByte()
+            payload[1] = totalChunks.toByte()
+            System.arraycopy(chunk.toByteArray(), 0, payload, 2, chunk.size)
+            queue.add(payload)
+        }
+        
+        if (writeInProgress[deviceAddress] != true) {
+            processNextWrite(deviceAddress)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun processNextWrite(deviceAddress: String) {
+        val queue = writeQueues[deviceAddress]
+        if (queue == null || queue.isEmpty()) {
+            writeInProgress[deviceAddress] = false
+            return
+        }
+        writeInProgress[deviceAddress] = true
+        val chunk = queue.poll()
+        if (chunk != null) {
+            val gatt = connections[deviceAddress] ?: return
+            val service = gatt.getService(RelayService.MESHLINK_SERVICE_UUID.uuid) ?: return
+            val char = service.getCharacteristic(GattServer.MESSAGE_CHAR_UUID) ?: return
+            char.value = chunk
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            gatt.writeCharacteristic(char)
+        } else {
+            writeInProgress[deviceAddress] = false
+        }
+    }
+
+    private val reconnectAttempts = ConcurrentHashMap<String, Int>()
+    private val reconnectHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val MAX_RECONNECT_ATTEMPTS = 5
 
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
@@ -98,15 +155,35 @@ class GattClient(
             val device = gatt.device
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.i(TAG, "Connected to ${device.address}")
+                reconnectAttempts.remove(device.address) // Reset retry counter on success
                 val requested = gatt.requestMtu(512)
                 if (!requested) {
                     gatt.discoverServices()
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.i(TAG, "Disconnected from ${device.address}")
+                Log.i(TAG, "Disconnected from ${device.address} (status=$status)")
                 connections.remove(device.address)
+                writeQueues.remove(device.address)
+                writeInProgress.remove(device.address)
                 gatt.close()
                 listener.onPeerDisconnected(device)
+                
+                // Auto-reconnect with exponential backoff
+                // Status 133 = common Android GATT error, also retry on those
+                val attempts = reconnectAttempts.getOrDefault(device.address, 0)
+                if (attempts < MAX_RECONNECT_ATTEMPTS) {
+                    val delayMs = (Math.min(2000L * (1L shl attempts), 60000L)) // 2s, 4s, 8s, 16s, 32s, max 60s
+                    reconnectAttempts[device.address] = attempts + 1
+                    Log.i(TAG, "Scheduling reconnect #${attempts + 1} to ${device.address} in ${delayMs}ms")
+                    reconnectHandler.postDelayed({
+                        if (!connections.containsKey(device.address)) {
+                            connectToPeer(device)
+                        }
+                    }, delayMs)
+                } else {
+                    Log.w(TAG, "Max reconnect attempts reached for ${device.address}")
+                    reconnectAttempts.remove(device.address)
+                }
             }
         }
 
@@ -194,6 +271,12 @@ class GattClient(
                     ?.getCharacteristic(GattServer.BEACON_CHAR_UUID)
                 if (beaconChar != null) {
                     gatt.readCharacteristic(beaconChar)
+                }
+            } else if (characteristic.uuid == GattServer.MESSAGE_CHAR_UUID) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    processNextWrite(gatt.device.address)
+                } else {
+                    writeInProgress[gatt.device.address] = false
                 }
             }
         }

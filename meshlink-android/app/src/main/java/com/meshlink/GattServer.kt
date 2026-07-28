@@ -169,9 +169,11 @@ class GattServer(
                         
                         if (chunkIndex == totalChunks - 1) {
                             val secret = sharedSecrets[device.address]
-                            if (secret != null) {
+                            if (secret != null && newBuffer.size >= 12) {
                                 try {
-                                    val decrypted = uniffi.meshlink_core.decryptTransport(secret, ByteArray(12) { 0 }, newBuffer)
+                                    val nonce = newBuffer.copyOfRange(0, 12)
+                                    val ciphertext = newBuffer.copyOfRange(12, newBuffer.size)
+                                    val decrypted = uniffi.meshlink_core.decryptTransport(secret, nonce, ciphertext)
                                     if (decrypted != null) {
                                         listener.onMessageReceived(device, decrypted)
                                     }
@@ -185,9 +187,11 @@ class GattServer(
                         }
                     } else {
                         val secret = sharedSecrets[device.address]
-                        if (secret != null) {
+                        if (secret != null && value.size >= 12) {
                             try {
-                                val decrypted = uniffi.meshlink_core.decryptTransport(secret, ByteArray(12) { 0 }, value)
+                                val nonce = value.copyOfRange(0, 12)
+                                val ciphertext = value.copyOfRange(12, value.size)
+                                val decrypted = uniffi.meshlink_core.decryptTransport(secret, nonce, ciphertext)
                                 if (decrypted != null) {
                                     listener.onMessageReceived(device, decrypted)
                                 }

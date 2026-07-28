@@ -2668,6 +2668,7 @@ enum class ProcessAction {
     
     DELIVER_LOCAL,
     RELAY,
+    DELIVER_AND_RELAY,
     DROP;
     companion object
 }

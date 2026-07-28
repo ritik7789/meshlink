@@ -32,6 +32,8 @@
             </intent-filter>
         </activity>
         
+        <activity android:name=".ChatActivity" />
+        
         <!-- Foreground service for background relay (NFR-3.1.2) -->
         <service android:name=".RelayService" android:foregroundServiceType="connectedDevice|location" />
 
