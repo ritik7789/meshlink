@@ -20,6 +20,23 @@ class ConversationAdapter(
     private val unreadCounts = mutableMapOf<Long, Int>()
     private val onlinePeers = mutableMapOf<String, Int>()
     private val dateFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+    private val dateFormatDate = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
+
+    private fun getRelativeDate(time: Long): String {
+        val calTime = Calendar.getInstance().apply { timeInMillis = time }
+        val calToday = Calendar.getInstance()
+        val calYesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+
+        return when {
+            calTime.get(Calendar.YEAR) == calToday.get(Calendar.YEAR) &&
+            calTime.get(Calendar.DAY_OF_YEAR) == calToday.get(Calendar.DAY_OF_YEAR) -> dateFormat.format(Date(time))
+            
+            calTime.get(Calendar.YEAR) == calYesterday.get(Calendar.YEAR) &&
+            calTime.get(Calendar.DAY_OF_YEAR) == calYesterday.get(Calendar.DAY_OF_YEAR) -> "Yesterday"
+            
+            else -> dateFormatDate.format(Date(time))
+        }
+    }
 
     fun setConversations(newConversations: List<MessageEntity>) {
         conversations.clear()
@@ -91,7 +108,7 @@ class ConversationAdapter(
             bg.setColor(Color.parseColor(colors[colorIndex]))
 
             tvLastMessage.text = lastMessage.plaintext
-            tvTimestamp.text = dateFormat.format(Date(lastMessage.timestamp))
+            tvTimestamp.text = getRelativeDate(lastMessage.timestamp)
 
             val isOnline = onlinePeers.values.contains(peerId.toInt())
             vOnlineStatus.backgroundTintList = android.content.res.ColorStateList.valueOf(

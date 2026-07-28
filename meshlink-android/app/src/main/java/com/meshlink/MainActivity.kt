@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.TextView
@@ -34,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var rvConversations: RecyclerView
     private lateinit var btnBroadcast: FloatingActionButton
+    private lateinit var tvEmptyState: TextView
     
     private lateinit var conversationAdapter: ConversationAdapter
     private val connectedPeers = mutableMapOf<String, Int>()
@@ -66,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         
         tvStatus = findViewById(R.id.tvStatus)
+        tvEmptyState = findViewById(R.id.tvEmptyState)
         rvConversations = findViewById(R.id.rvConversations)
         btnBroadcast = findViewById(R.id.btnBroadcast)
 
@@ -130,14 +133,14 @@ class MainActivity : AppCompatActivity() {
     
     private fun loadConversations() {
         CoroutineScope(Dispatchers.IO).launch {
-            val conversations = db.messageDao().getConversationList()
-            
+            val convos = db.messageDao().getConversationList()
             withContext(Dispatchers.Main) {
-                conversationAdapter.setConversations(conversations)
+                conversationAdapter.setConversations(convos)
+                tvEmptyState.visibility = if (convos.isEmpty()) View.VISIBLE else View.GONE
             }
             
             // Load unread counts
-            conversations.forEach {
+            convos.forEach {
                 val peerId = if (it.direction == "OUTBOUND") it.recipientId else it.senderId
                 val unread = db.messageDao().getUnreadCount(peerId)
                 withContext(Dispatchers.Main) {

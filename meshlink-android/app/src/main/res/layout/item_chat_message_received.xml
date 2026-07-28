@@ -2,36 +2,59 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:gravity="start"
-    android:paddingStart="16dp"
-    android:paddingEnd="64dp"
+    android:orientation="vertical"
     android:paddingTop="4dp"
     android:paddingBottom="4dp">
 
-    <LinearLayout
+    <TextView
+        android:id="@+id/tvDateHeader"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_received_bubble"
-        android:orientation="vertical"
-        android:paddingStart="12dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginBottom="8dp"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/bg_date_pill"
+        android:paddingBottom="4dp"
         android:paddingEnd="12dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp">
+        android:paddingStart="12dp"
+        android:paddingTop="4dp"
+        android:textColor="#8696A0"
+        android:textSize="12sp"
+        android:visibility="gone" />
 
-        <TextView
-            android:id="@+id/tvMessage"
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="start"
+        android:paddingStart="16dp"
+        android:paddingEnd="64dp">
+
+        <LinearLayout
+            android:id="@+id/bubbleContainer"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp" />
+            android:background="@drawable/bg_received_bubble"
+            android:orientation="vertical"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
 
-        <TextView
-            android:id="@+id/tvTimestamp"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="end"
-            android:layout_marginTop="2dp"
-            android:textColor="#8E9BA7"
-            android:textSize="11sp" />
+            <TextView
+                android:id="@+id/tvMessage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#E9EDEF"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/tvTimestamp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end"
+                android:layout_marginTop="2dp"
+                android:textColor="#8696A0"
+                android:textSize="11sp" />
+        </LinearLayout>
     </LinearLayout>
 </LinearLayout>

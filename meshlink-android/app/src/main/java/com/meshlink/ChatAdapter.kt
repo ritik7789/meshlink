@@ -78,10 +78,36 @@ class ChatAdapter(
         return messages.filter { selectedMessageIds.contains(it.messageId) }
     }
 
+    private val dateFormatDate = SimpleDateFormat("dd MMMM yyyy", Locale.getDefault())
+
+    private fun isSameDay(time1: Long, time2: Long): Boolean {
+        val cal1 = Calendar.getInstance().apply { timeInMillis = time1 }
+        val cal2 = Calendar.getInstance().apply { timeInMillis = time2 }
+        return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
+               cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+    }
+
+    private fun getRelativeDate(time: Long): String {
+        val calTime = Calendar.getInstance().apply { timeInMillis = time }
+        val calToday = Calendar.getInstance()
+        val calYesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+
+        return when {
+            calTime.get(Calendar.YEAR) == calToday.get(Calendar.YEAR) &&
+            calTime.get(Calendar.DAY_OF_YEAR) == calToday.get(Calendar.DAY_OF_YEAR) -> "Today"
+            
+            calTime.get(Calendar.YEAR) == calYesterday.get(Calendar.YEAR) &&
+            calTime.get(Calendar.DAY_OF_YEAR) == calYesterday.get(Calendar.DAY_OF_YEAR) -> "Yesterday"
+            
+            else -> dateFormatDate.format(Date(time))
+        }
+    }
+
     inner class SentMessageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val tvMessage: TextView = itemView.findViewById(R.id.tvMessage)
         private val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
         private val tvStatus: TextView = itemView.findViewById(R.id.tvStatus)
+        private val tvDateHeader: TextView = itemView.findViewById(R.id.tvDateHeader)
 
         init {
             itemView.setOnClickListener {
@@ -108,13 +134,22 @@ class ChatAdapter(
             if (message.isStarred) tvStatus.text = "★ " + tvStatus.text
             
             itemView.setBackgroundColor(if (selectedMessageIds.contains(message.messageId)) 
-                android.graphics.Color.parseColor("#336C9ECF") else android.graphics.Color.TRANSPARENT)
+                android.graphics.Color.parseColor("#3300A884") else android.graphics.Color.TRANSPARENT)
+
+            // Date Header Logic
+            if (adapterPosition == 0 || !isSameDay(message.timestamp, messages[adapterPosition - 1].timestamp)) {
+                tvDateHeader.visibility = View.VISIBLE
+                tvDateHeader.text = getRelativeDate(message.timestamp)
+            } else {
+                tvDateHeader.visibility = View.GONE
+            }
         }
     }
 
     inner class ReceivedMessageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val tvMessage: TextView = itemView.findViewById(R.id.tvMessage)
         private val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
+        private val tvDateHeader: TextView = itemView.findViewById(R.id.tvDateHeader)
 
         init {
             itemView.setOnClickListener {
@@ -134,7 +169,15 @@ class ChatAdapter(
             if (message.isStarred) tvTimestamp.text = "★ " + tvTimestamp.text
             
             itemView.setBackgroundColor(if (selectedMessageIds.contains(message.messageId)) 
-                android.graphics.Color.parseColor("#336C9ECF") else android.graphics.Color.TRANSPARENT)
+                android.graphics.Color.parseColor("#3300A884") else android.graphics.Color.TRANSPARENT)
+
+            // Date Header Logic
+            if (adapterPosition == 0 || !isSameDay(message.timestamp, messages[adapterPosition - 1].timestamp)) {
+                tvDateHeader.visibility = View.VISIBLE
+                tvDateHeader.text = getRelativeDate(message.timestamp)
+            } else {
+                tvDateHeader.visibility = View.GONE
+            }
         }
     }
 }
