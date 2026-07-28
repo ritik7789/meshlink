@@ -82,7 +82,9 @@ class ChatActivity : AppCompatActivity() {
         btnBack = findViewById(R.id.btnBack)
 
         val peerStr = String.format("%04d", peerBeaconId % 10000)
-        tvPeerName.text = "Node $peerStr"
+        val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
+        val username = prefs.getString("peer_name_$peerBeaconId", "Node $peerStr")
+        tvPeerName.text = username
         tvBeaconId.text = "Beacon: $peerBeaconId"
         
         // Assume online initially if we opened from the list, though you could pass it in intent.

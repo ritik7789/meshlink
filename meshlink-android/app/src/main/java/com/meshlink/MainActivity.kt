@@ -8,6 +8,9 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.Menu
+import android.view.MenuItem
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
@@ -82,7 +85,19 @@ class MainActivity : AppCompatActivity() {
         rvConversations.layoutManager = LinearLayoutManager(this)
         rvConversations.adapter = conversationAdapter
 
-        btnBroadcast.setOnClickListener { showBroadcastDialog() }
+        btnBroadcast.setOnClickListener { showNewChatDialog() }
+        
+        // Add toolbar for menu
+        val toolbar = androidx.appcompat.widget.Toolbar(this).apply {
+            setTitleTextColor(android.graphics.Color.WHITE)
+            title = "MeshLink"
+        }
+        val params = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        (findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0) as android.view.ViewGroup).addView(toolbar, 0, params)
+        setSupportActionBar(toolbar)
 
         checkAndRequestPermissions()
     }
@@ -138,23 +153,92 @@ class MainActivity : AppCompatActivity() {
         loadConversations()
     }
 
-    private fun showBroadcastDialog() {
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_set_username -> {
+                showSetUsernameDialog()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun showSetUsernameDialog() {
         val input = EditText(this)
+        val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
+        input.setText(prefs.getString("username", ""))
+        input.hint = "Enter your username"
+        
         AlertDialog.Builder(this)
-            .setTitle("Broadcast Message")
+            .setTitle("Set Username")
             .setView(input)
-            .setPositiveButton("Send") { _, _ ->
-                val text = input.text.toString()
+            .setPositiveButton("Save") { _, _ ->
+                val text = input.text.toString().trim()
                 if (text.isNotBlank()) {
+                    prefs.edit().putString("username", text).apply()
+                    // Broadcast new username to all connected peers
                     val intent = Intent(this, RelayService::class.java).apply {
                         action = "BROADCAST_MESSAGE"
-                        putExtra("message", text)
+                        putExtra("message", "__SYS_NAME__:$text")
                     }
                     startService(intent)
-                    Toast.makeText(this, "Broadcast sent", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Username updated", Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showNewChatDialog() {
+        val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
+        val peerList = mutableListOf<Pair<String, Long>>() // name, beaconId
+        peerList.add(Pair("Broadcast to All", 0L))
+        
+        for ((address, beaconId) in connectedPeers) {
+            val username = prefs.getString("peer_name_$beaconId", "Node ${String.format("%04d", beaconId % 10000)}")
+            peerList.add(Pair(username!!, beaconId.toLong()))
+        }
+
+        val names = peerList.map { it.first }.toTypedArray()
+        
+        AlertDialog.Builder(this)
+            .setTitle("New Chat")
+            .setItems(names) { _, which ->
+                val selected = peerList[which]
+                if (selected.second == 0L) {
+                    // Broadcast
+                    val input = EditText(this)
+                    AlertDialog.Builder(this)
+                        .setTitle("Broadcast Message")
+                        .setView(input)
+                        .setPositiveButton("Send") { _, _ ->
+                            val text = input.text.toString()
+                            if (text.isNotBlank()) {
+                                val intent = Intent(this, RelayService::class.java).apply {
+                                    action = "BROADCAST_MESSAGE"
+                                    putExtra("message", text)
+                                }
+                                startService(intent)
+                                Toast.makeText(this, "Broadcast sent", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                } else {
+                    // Chat with peer
+                    val address = connectedPeers.entries.find { it.value.toLong() == selected.second }?.key ?: ""
+                    val intent = Intent(this, ChatActivity::class.java).apply {
+                        putExtra("peer_address", address)
+                        putExtra("peer_beacon_id", selected.second)
+                    }
+                    startActivity(intent)
+                }
+            }
             .show()
     }
 

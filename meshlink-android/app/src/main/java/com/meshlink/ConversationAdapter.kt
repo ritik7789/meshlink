@@ -77,9 +77,11 @@ class ConversationAdapter(
 
         fun bind(lastMessage: MessageEntity, peerId: Long) {
             val peerStr = String.format("%04d", peerId % 10000)
-            tvPeerName.text = "Node $peerStr"
+            val prefs = itemView.context.getSharedPreferences("MeshLinkPrefs", android.content.Context.MODE_PRIVATE)
+            val username = prefs.getString("peer_name_$peerId", "Node $peerStr")
+            tvPeerName.text = username
             
-            val initial = peerStr.firstOrNull()?.toString() ?: "?"
+            val initial = username?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
             tvAvatar.text = initial
             
             // Randomish color based on peerId
