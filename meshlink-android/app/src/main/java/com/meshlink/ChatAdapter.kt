@@ -53,12 +53,42 @@ class ChatAdapter(
 
     override fun getItemCount(): Int = messages.size
 
+    private val selectedMessageIds = mutableSetOf<String>()
+    var isSelectionMode = false
+
+    fun toggleSelection(messageId: String) {
+        if (selectedMessageIds.contains(messageId)) {
+            selectedMessageIds.remove(messageId)
+        } else {
+            selectedMessageIds.add(messageId)
+        }
+        if (selectedMessageIds.isEmpty()) {
+            isSelectionMode = false
+        }
+        notifyDataSetChanged()
+    }
+
+    fun clearSelection() {
+        selectedMessageIds.clear()
+        isSelectionMode = false
+        notifyDataSetChanged()
+    }
+
+    fun getSelectedMessages(): List<MessageEntity> {
+        return messages.filter { selectedMessageIds.contains(it.messageId) }
+    }
+
     inner class SentMessageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val tvMessage: TextView = itemView.findViewById(R.id.tvMessage)
         private val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
         private val tvStatus: TextView = itemView.findViewById(R.id.tvStatus)
 
         init {
+            itemView.setOnClickListener {
+                if (isSelectionMode) {
+                    onMessageLongClick(messages[adapterPosition])
+                }
+            }
             itemView.setOnLongClickListener {
                 onMessageLongClick(messages[adapterPosition])
                 true
@@ -75,6 +105,10 @@ class ChatAdapter(
                 "FAILED" -> "!"
                 else -> ""
             }
+            if (message.isStarred) tvStatus.text = "★ " + tvStatus.text
+            
+            itemView.setBackgroundColor(if (selectedMessageIds.contains(message.messageId)) 
+                android.graphics.Color.parseColor("#336C9ECF") else android.graphics.Color.TRANSPARENT)
         }
     }
 
@@ -83,6 +117,11 @@ class ChatAdapter(
         private val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
 
         init {
+            itemView.setOnClickListener {
+                if (isSelectionMode) {
+                    onMessageLongClick(messages[adapterPosition])
+                }
+            }
             itemView.setOnLongClickListener {
                 onMessageLongClick(messages[adapterPosition])
                 true
@@ -92,6 +131,10 @@ class ChatAdapter(
         fun bind(message: MessageEntity) {
             tvMessage.text = message.plaintext
             tvTimestamp.text = dateFormat.format(Date(message.timestamp))
+            if (message.isStarred) tvTimestamp.text = "★ " + tvTimestamp.text
+            
+            itemView.setBackgroundColor(if (selectedMessageIds.contains(message.messageId)) 
+                android.graphics.Color.parseColor("#336C9ECF") else android.graphics.Color.TRANSPARENT)
         }
     }
 }

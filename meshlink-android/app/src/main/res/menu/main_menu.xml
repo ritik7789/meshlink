@@ -5,4 +5,8 @@
         android:id="@+id/action_set_username"
         android:title="Set Username"
         app:showAsAction="never" />
+    <item
+        android:id="@+id/action_starred_messages"
+        android:title="Starred Messages"
+        app:showAsAction="never" />
 </menu>

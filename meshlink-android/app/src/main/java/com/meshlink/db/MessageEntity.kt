@@ -13,7 +13,8 @@ data class MessageEntity(
     val timestamp: Long,
     val direction: String,  // "INBOUND" or "OUTBOUND"
     val status: String,     // "SENT", "DELIVERED", "PENDING_RELAY", "FAILED", "RECEIVED"
-    val isBroadcast: Boolean = false
+    val isBroadcast: Boolean = false,
+    val isStarred: Boolean = false
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

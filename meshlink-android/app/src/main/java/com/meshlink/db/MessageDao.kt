@@ -53,7 +53,6 @@ interface MessageDao {
         SELECT * FROM messages 
         WHERE messageId IN (
             SELECT messageId FROM messages 
-            WHERE isBroadcast = 0
             GROUP BY CASE WHEN direction = 'OUTBOUND' THEN recipientId ELSE senderId END 
             HAVING timestamp = MAX(timestamp)
         )
@@ -65,6 +64,12 @@ interface MessageDao {
 
     @Query("UPDATE messages SET status = :status WHERE messageId = :messageId")
     suspend fun updateStatus(messageId: String, status: String)
+
+    @Query("UPDATE messages SET isStarred = :isStarred WHERE messageId = :messageId")
+    suspend fun updateStarStatus(messageId: String, isStarred: Boolean)
+
+    @Query("SELECT * FROM messages WHERE isStarred = 1 ORDER BY timestamp DESC")
+    suspend fun getStarredMessages(): List<MessageEntity>
 
     // ── Delete Operations ──
 

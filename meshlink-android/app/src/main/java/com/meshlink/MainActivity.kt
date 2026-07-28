@@ -164,6 +164,10 @@ class MainActivity : AppCompatActivity() {
                 showSetUsernameDialog()
                 true
             }
+            R.id.action_starred_messages -> {
+                showStarredMessagesDialog()
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -192,6 +196,25 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun showStarredMessagesDialog() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val starred = db.messageDao().getStarredMessages()
+            withContext(Dispatchers.Main) {
+                if (starred.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "No starred messages", Toast.LENGTH_SHORT).show()
+                    return@withContext
+                }
+                
+                val texts = starred.map { it.plaintext }.toTypedArray()
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Starred Messages")
+                    .setItems(texts) { _, _ -> }
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+        }
     }
 
     private fun showNewChatDialog() {

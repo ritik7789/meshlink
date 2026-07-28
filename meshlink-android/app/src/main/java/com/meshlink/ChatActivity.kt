@@ -66,6 +66,55 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
+    private var actionMode: android.view.ActionMode? = null
+
+    private val actionModeCallback = object : android.view.ActionMode.Callback {
+        override fun onCreateActionMode(mode: android.view.ActionMode?, menu: android.view.Menu?): Boolean {
+            menu?.add(0, 1, 0, "Delete")?.setIcon(android.R.drawable.ic_menu_delete)?.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+            menu?.add(0, 2, 0, "Copy")?.setIcon(android.R.drawable.ic_menu_set_as)?.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+            menu?.add(0, 3, 0, "Star")?.setIcon(android.R.drawable.btn_star)?.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+            return true
+        }
+
+        override fun onPrepareActionMode(mode: android.view.ActionMode?, menu: android.view.Menu?): Boolean = false
+
+        override fun onActionItemClicked(mode: android.view.ActionMode?, item: android.view.MenuItem?): Boolean {
+            val selected = chatAdapter.getSelectedMessages()
+            when (item?.itemId) {
+                1 -> { // Delete
+                    CoroutineScope(Dispatchers.IO).launch {
+                        selected.forEach { db.messageDao().deleteMessage(it.messageId) }
+                        loadMessages()
+                    }
+                    mode?.finish()
+                    return true
+                }
+                2 -> { // Copy
+                    val text = selected.joinToString("\n") { it.plaintext }
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Copied Messages", text))
+                    Toast.makeText(this@ChatActivity, "Copied", Toast.LENGTH_SHORT).show()
+                    mode?.finish()
+                    return true
+                }
+                3 -> { // Star
+                    CoroutineScope(Dispatchers.IO).launch {
+                        selected.forEach { db.messageDao().updateStarStatus(it.messageId, !it.isStarred) }
+                        loadMessages()
+                    }
+                    mode?.finish()
+                    return true
+                }
+            }
+            return false
+        }
+
+        override fun onDestroyActionMode(mode: android.view.ActionMode?) {
+            chatAdapter.clearSelection()
+            actionMode = null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
@@ -90,9 +139,20 @@ class ChatActivity : AppCompatActivity() {
         // Assume online initially if we opened from the list, though you could pass it in intent.
         // It will update when broadcast received.
         updateOnlineStatus(true) 
-
+        
         chatAdapter = ChatAdapter { message ->
-            showDeleteDialog(message)
+            if (actionMode == null) {
+                actionMode = startActionMode(actionModeCallback)
+                chatAdapter.isSelectionMode = true
+            }
+            chatAdapter.toggleSelection(message.messageId)
+            
+            val count = chatAdapter.getSelectedMessages().size
+            if (count == 0) {
+                actionMode?.finish()
+            } else {
+                actionMode?.title = "$count selected"
+            }
         }
         
         rvChat.layoutManager = LinearLayoutManager(this).apply {
