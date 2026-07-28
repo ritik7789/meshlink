@@ -1,0 +1,8 @@
+# AI Agent Rules & Guidelines
+
+## 1. Git Workflow & Remote Pushes (CRITICAL)
+- **STRICT RULE**: Do NOT push code directly to the `main` branch under any circumstances.
+- **ALWAYS** use the `dev` branch for development and remote pushes.
+- If the `dev` branch does not exist, create it from `main` (`git checkout -b dev`) before pushing.
+- A `pre-push` git hook has been installed to enforce this behavior and will reject any pushes to `main`.
+- Wait for the user to explicitly request rigorous testing before proposing to merge `dev` into `main`.
