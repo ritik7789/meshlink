@@ -312,10 +312,18 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            var criticalGranted = true
+            for (i in permissions.indices) {
+                val perm = permissions[i]
+                val granted = grantResults[i] == PackageManager.PERMISSION_GRANTED
+                if (!granted && perm != Manifest.permission.POST_NOTIFICATIONS && perm != Manifest.permission.NEARBY_WIFI_DEVICES) {
+                    criticalGranted = false
+                }
+            }
+            if (criticalGranted) {
                 startMeshService()
             } else {
-                Toast.makeText(this, "Permissions Denied. Cannot start MeshLink.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Critical BLE permissions denied. Cannot start MeshLink.", Toast.LENGTH_LONG).show()
             }
         }
     }
