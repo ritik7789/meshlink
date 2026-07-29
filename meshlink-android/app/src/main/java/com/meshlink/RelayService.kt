@@ -408,6 +408,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                         ))
                     }
 
+                    showMessageNotification(envelope.senderId, plaintext, isBroadcast)
+
                     // Broadcast decrypted plaintext to UI
                     val intent = Intent(ACTION_MESSAGE_RECEIVED).apply {
                         putExtra(EXTRA_PEER_ADDRESS, device.address)
@@ -518,8 +520,16 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         ).apply {
             description = "Maintains the off-grid mesh network"
         }
+        val msgChannel = NotificationChannel(
+            "MeshLinkMessages",
+            "MeshLink Messages",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Notifications for incoming messages"
+        }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
+        manager.createNotificationChannel(msgChannel)
     }
 
     private fun createNotification(): Notification {
@@ -528,5 +538,30 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             .setContentText("Relaying messages for the mesh network")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
+    }
+
+    private fun showMessageNotification(senderId: UInt, message: String, isBroadcast: Boolean) {
+        val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
+        val senderName = prefs.getString("peer_name_$senderId", "Node ${String.format("%04d", senderId.toLong() % 10000)}")
+        
+        val title = if (isBroadcast) "Broadcast from $senderName" else "Message from $senderName"
+        
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            this, 0, intent, android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = Notification.Builder(this, "MeshLinkMessages")
+            .setContentTitle(title)
+            .setContentText(message)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(senderId.toInt(), notification)
     }
 }
