@@ -13,6 +13,8 @@ import android.view.MenuItem
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.EditText
+import android.provider.Settings
+import android.net.Uri
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -323,9 +325,26 @@ class MainActivity : AppCompatActivity() {
             if (criticalGranted) {
                 startMeshService()
             } else {
-                Toast.makeText(this, "Critical BLE permissions denied. Cannot start MeshLink.", Toast.LENGTH_LONG).show()
+                showPermissionSettingsDialog()
             }
         }
+    }
+
+    private fun showPermissionSettingsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Permissions Required")
+            .setMessage("MeshLink needs Bluetooth and Location permissions to discover and connect to nearby devices off-grid. Please grant them in app settings to use the app.")
+            .setPositiveButton("Open Settings") { _, _ ->
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", packageName, null)
+                }
+                startActivity(intent)
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                Toast.makeText(this, "MeshLink cannot function without BLE permissions.", Toast.LENGTH_LONG).show()
+            }
+            .setCancelable(false)
+            .show()
     }
 
     private fun startMeshService() {
