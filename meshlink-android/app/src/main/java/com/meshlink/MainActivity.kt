@@ -91,17 +91,10 @@ class MainActivity : AppCompatActivity() {
         rvConversations.adapter = conversationAdapter
 
         btnBroadcast.setOnClickListener { showNewChatDialog() }
-        
-        // Add toolbar for menu
-        val toolbar = androidx.appcompat.widget.Toolbar(this).apply {
-            setTitleTextColor(android.graphics.Color.WHITE)
-            title = "MeshLink"
-        }
-        val params = android.widget.LinearLayout.LayoutParams(
-            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-        )
-        (findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0) as android.view.ViewGroup).addView(toolbar, 0, params)
+
+        val toolbar = findViewById<androidx.appcompat.widget.Toolbar>(R.id.toolbar)
+        toolbar.setTitleTextColor(android.graphics.Color.WHITE)
+        toolbar.title = "MeshLink"
         setSupportActionBar(toolbar)
 
         checkAndRequestPermissions()
@@ -120,12 +113,34 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(serviceReceiver, filter)
         }
         
-        val syncIntent = Intent(this, RelayService::class.java).apply {
-            action = "SYNC_STATE"
+        if (hasCriticalPermissions()) {
+            val syncIntent = Intent(this, RelayService::class.java).apply {
+                action = "SYNC_STATE"
+            }
+            startService(syncIntent)
         }
-        startService(syncIntent)
-        
+
         loadConversations()
+    }
+
+    /** Permissions RelayService needs before it can start its foreground BLE mesh. */
+    private fun criticalPermissions(): List<String> {
+        val permissions = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        return permissions
+    }
+
+    private fun hasCriticalPermissions(): Boolean {
+        return criticalPermissions().all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
     override fun onStop() {
@@ -285,16 +300,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkAndRequestPermissions() {
-        val permissions = mutableListOf<String>()
-        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
-            permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-        
+        val permissions = criticalPermissions().toMutableList()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -314,15 +321,7 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            var criticalGranted = true
-            for (i in permissions.indices) {
-                val perm = permissions[i]
-                val granted = grantResults[i] == PackageManager.PERMISSION_GRANTED
-                if (!granted && perm != Manifest.permission.POST_NOTIFICATIONS && perm != Manifest.permission.NEARBY_WIFI_DEVICES) {
-                    criticalGranted = false
-                }
-            }
-            if (criticalGranted) {
+            if (hasCriticalPermissions()) {
                 startMeshService()
             } else {
                 showPermissionSettingsDialog()
