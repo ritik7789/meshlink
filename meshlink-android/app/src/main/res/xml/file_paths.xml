@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Received and prepared attachments live here, inside app-private storage. -->
+    <files-path name="media" path="media/" />
+</paths>

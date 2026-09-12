@@ -27,7 +27,14 @@ import android.os.ParcelUuid
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import com.meshlink.db.AppDatabase
+import com.meshlink.db.EmergencyKind
+import com.meshlink.db.GroupEntity
+import com.meshlink.db.GroupMemberEntity
+import com.meshlink.db.EmergencyUsageEntity
+import com.meshlink.db.MediaState
+import com.meshlink.db.MessageType
 import com.meshlink.db.CustodyEntity
 import com.meshlink.db.MessageEntity
 import kotlinx.coroutines.CoroutineScope
@@ -76,8 +83,39 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         const val ACTION_SYNC_STATE = "SYNC_STATE"
         const val ACTION_ANNOUNCE_PRESENCE = "ANNOUNCE_PRESENCE"
 
+        /** Sent by the UI after the block list changes, to refresh the filter. */
+        const val ACTION_BLOCKLIST_CHANGED = "BLOCKLIST_CHANGED"
+
+        /** Start offering a local file to a peer. */
+        const val ACTION_SEND_MEDIA = "SEND_MEDIA"
+        /** Accept an offer and begin fetching it. */
+        const val ACTION_FETCH_MEDIA = "FETCH_MEDIA"
+
+        const val EXTRA_MEDIA_ID = "extra_media_id"
+        const val EXTRA_MEDIA_NAME = "extra_media_name"
+        const val EXTRA_MEDIA_MIME = "extra_media_mime"
+        const val EXTRA_EMERGENCY = "extra_emergency"
+
+        /** Group actions driven from the UI. */
+        const val ACTION_CREATE_GROUP = "CREATE_GROUP"
+        const val ACTION_SEND_GROUP_MESSAGE = "SEND_GROUP_MESSAGE"
+        const val ACTION_UPDATE_GROUP_ROSTER = "UPDATE_GROUP_ROSTER"
+        const val ACTION_DELETE_GROUP_MESSAGE = "DELETE_GROUP_MESSAGE"
+        const val ACTION_LEAVE_GROUP = "LEAVE_GROUP"
+
+        const val EXTRA_GROUP_ID = "extra_group_id"
+        const val EXTRA_GROUP_NAME = "extra_group_name"
+        const val EXTRA_GROUP_MEMBERS = "extra_group_members"
+        const val EXTRA_GROUP_ADMINS = "extra_group_admins"
+        const val EXTRA_TARGET_MESSAGE_ID = "extra_target_message_id"
+
+        /** Shown in place of a message an admin or its author retracted. */
+        const val DELETED_BY_ADMIN = "This message is deleted by admin"
+        const val DELETED_BY_AUTHOR = "This message was deleted"
+
         const val EXTRA_BEACON_ID = "extra_beacon_id"
         const val EXTRA_MESSAGE = "extra_message"
+        const val EXTRA_MESSAGE_TYPE = "extra_message_type"
         const val EXTRA_MESSAGE_DATA = "extra_message_data"
         const val EXTRA_SENDER_BEACON = "extra_sender_beacon"
         const val EXTRA_IS_BROADCAST = "extra_is_broadcast"
@@ -92,6 +130,17 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         const val PREF_USERNAME = "username"
 
         private const val PRESENCE_VERSION = 1
+
+        /** Payload types belonging to the media handshake rather than conversation. */
+        private val MEDIA_PAYLOAD_TYPES = setOf(
+            uniffi.meshlink_core.PayloadType.MEDIA_OFFER,
+            uniffi.meshlink_core.PayloadType.MEDIA_REQUEST,
+            uniffi.meshlink_core.PayloadType.MEDIA_CHUNK,
+            uniffi.meshlink_core.PayloadType.MEDIA_COMPLETE
+        )
+
+        /** Brand accent applied to notification icons and headers. */
+        private const val NOTIFICATION_ACCENT = "#00A884"
 
         /** Must be comfortably below [PeerManager.ROSTER_ENTRY_TTL_MS]. */
         private const val PRESENCE_INTERVAL_MS = 20_000L
@@ -111,6 +160,15 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         private const val RETRY_BASE_GAP_MS = 20_000L
         private const val RETRY_MAX_GAP_MS = 10L * 60 * 1000
 
+        /**
+         * Largest payload allowed to travel inline, and therefore across hops.
+         *
+         * Measured on the sealed bytes rather than the original file, because
+         * that is what actually occupies the radio. Anything above this has to go
+         * over a direct link as a media transfer.
+         */
+        const val MAX_INLINE_PAYLOAD_BYTES = 10 * 1024
+
         /** Prefixes for the persisted per-node keys. */
         private const val PREF_NODE_KEY_PREFIX = "node_xk_"
         private const val PREF_NODE_IDENTITY_PREFIX = "node_ik_"
@@ -120,6 +178,23 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
         /** How long a carried message is held before it is given up on. */
         private const val CUSTODY_RETENTION_MS = 24L * 60 * 60 * 1000
+
+        /** Window both emergency ledgers are measured over. */
+        private const val EMERGENCY_WINDOW_MS = 7L * 24 * 60 * 60 * 1000
+
+        /** Emergency transfers this node may start per window. */
+        const val EMERGENCY_SENDS_PER_WINDOW = 2
+
+        /**
+         * Bulk bytes this node will carry across hops for any one sender per
+         * window. Enforced independently of the sender's own limit, so a client
+         * that ignores its allowance still cannot conscript other people's
+         * radios: roughly two full-size transfers, then it stops relaying.
+         */
+        private const val EMERGENCY_RELAY_BYTES_PER_WINDOW = 2L * 512 * 1024
+
+        /** Emitted when an emergency send is refused, so the UI can explain why. */
+        const val ACTION_EMERGENCY_REFUSED = "com.meshlink.ACTION_EMERGENCY_REFUSED"
         private const val DEDUP_MAX_AGE_SECS = 300u
     }
 
@@ -153,6 +228,13 @@ class RelayService : Service(), GattServerListener, GattClientListener {
      * neighbour on every tick.
      */
     private val offeredToCarriers = ConcurrentHashMap<String, MutableSet<Int>>()
+
+    /**
+     * Blocked nodes, mirrored in memory because it is consulted on every inbound
+     * message and a database round-trip per packet would sit on the BLE callback
+     * thread. The database remains the source of truth; this is refreshed from it.
+     */
+    private val blockedNodes: MutableSet<Int> = ConcurrentHashMap.newKeySet()
 
     /**
      * Messages from a sender whose static key has not arrived yet, held until
@@ -214,6 +296,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         Log.i(TAG, "Local Beacon ID: $localBeaconId")
 
         restoreKnownNodeKeys()
+        refreshBlockList()
+        refreshEmergencyBudgets()
 
         // The mesh is entirely dependent on the radio, and the user can toggle it
         // at any moment. Watching for that is what lets the service recover on its
@@ -288,6 +372,20 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         Log.i(TAG, "Restored encryption keys for $restored known node(s)")
     }
 
+    /** Reloads the in-memory block filter from the database. */
+    private fun refreshBlockList() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val rows = AppDatabase.getDatabase(this@RelayService).blockedNodeDao().blockedRows()
+            blockedNodes.clear()
+            rows.forEach { blockedNodes.add(rowToBeaconId(it)) }
+            Log.i(TAG, "Block list: ${blockedNodes.size} node(s)")
+            // A newly blocked node must disappear from the roster immediately.
+            publishRoster()
+        }
+    }
+
+    private fun isBlocked(beaconId: Int): Boolean = blockedNodes.contains(beaconId)
+
     private fun rememberNodeKey(beaconId: Int, staticKey: ByteArray, identityKey: ByteArray?) {
         peerManager.rememberStaticKey(beaconId, staticKey)
         val editor = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
@@ -323,8 +421,9 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             ACTION_SEND_MESSAGE -> {
                 val beaconId = intent.getIntExtra(EXTRA_BEACON_ID, 0)
                 val message = intent.getStringExtra(EXTRA_MESSAGE)
+                val type = intent.getStringExtra(EXTRA_MESSAGE_TYPE) ?: MessageType.TEXT
                 if (beaconId != 0 && !message.isNullOrBlank()) {
-                    sendMessageToNode(beaconId, message)
+                    sendMessageToNode(beaconId, message, type)
                 }
             }
             ACTION_BROADCAST_MESSAGE -> {
@@ -337,6 +436,45 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                 publishBluetoothState()
             }
             ACTION_ANNOUNCE_PRESENCE -> announcePresence()
+            ACTION_BLOCKLIST_CHANGED -> refreshBlockList()
+            ACTION_SEND_MEDIA -> {
+                val beaconId = intent.getIntExtra(EXTRA_BEACON_ID, 0)
+                val mediaId = intent.getStringExtra(EXTRA_MEDIA_ID)
+                val name = intent.getStringExtra(EXTRA_MEDIA_NAME) ?: "attachment"
+                val mime = intent.getStringExtra(EXTRA_MEDIA_MIME) ?: "application/octet-stream"
+                val emergency = intent.getBooleanExtra(EXTRA_EMERGENCY, false)
+                if (beaconId != 0 && mediaId != null) offerMedia(beaconId, mediaId, name, mime, emergency)
+            }
+            ACTION_CREATE_GROUP -> {
+                val name = intent.getStringExtra(EXTRA_GROUP_NAME) ?: "Group"
+                val members = intent.getLongArrayExtra(EXTRA_GROUP_MEMBERS) ?: LongArray(0)
+                createGroup(name, members.toList())
+            }
+            ACTION_SEND_GROUP_MESSAGE -> {
+                val groupId = intent.getStringExtra(EXTRA_GROUP_ID)
+                val body = intent.getStringExtra(EXTRA_MESSAGE)
+                val type = intent.getStringExtra(EXTRA_MESSAGE_TYPE) ?: MessageType.TEXT
+                if (groupId != null && !body.isNullOrBlank()) sendGroupChat(groupId, body, type)
+            }
+            ACTION_UPDATE_GROUP_ROSTER -> {
+                val groupId = intent.getStringExtra(EXTRA_GROUP_ID) ?: return START_STICKY
+                val members = intent.getLongArrayExtra(EXTRA_GROUP_MEMBERS) ?: LongArray(0)
+                val admins = intent.getLongArrayExtra(EXTRA_GROUP_ADMINS) ?: LongArray(0)
+                updateGroupRoster(groupId, members.toList(), admins.toSet())
+            }
+            ACTION_DELETE_GROUP_MESSAGE -> {
+                val groupId = intent.getStringExtra(EXTRA_GROUP_ID) ?: return START_STICKY
+                val target = intent.getStringExtra(EXTRA_TARGET_MESSAGE_ID) ?: return START_STICKY
+                deleteGroupMessage(groupId, target)
+            }
+            ACTION_LEAVE_GROUP -> {
+                intent.getStringExtra(EXTRA_GROUP_ID)?.let { leaveGroup(it) }
+            }
+            ACTION_FETCH_MEDIA -> {
+                val beaconId = intent.getIntExtra(EXTRA_BEACON_ID, 0)
+                val mediaId = intent.getStringExtra(EXTRA_MEDIA_ID)
+                if (beaconId != 0 && mediaId != null) requestMedia(beaconId, mediaId)
+            }
         }
         return START_STICKY
     }
@@ -439,6 +577,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         override fun run() {
             dedupCache.cleanupExpired(DEDUP_MAX_AGE_SECS)
             peerManager.cleanupExpired()
+            refreshEmergencyBudgets()
             CoroutineScope(Dispatchers.IO).launch {
                 AppDatabase.getDatabase(this@RelayService).custodyDao()
                     .releaseExpired(System.currentTimeMillis() - CUSTODY_RETENTION_MS)
@@ -718,12 +857,16 @@ class RelayService : Service(), GattServerListener, GattClientListener {
      * way forward ciphertext they cannot read. If that key is not known yet the
      * message is stored as pending and retried once presence gossip supplies it.
      */
-    fun sendMessageToNode(beaconId: Int, message: String) {
+    fun sendMessageToNode(
+        beaconId: Int,
+        message: String,
+        messageType: String = MessageType.TEXT
+    ) {
         val recipientKey = peerManager.staticKeyFor(beaconId)
         val messageId = UUID.randomUUID().toString()
 
         val envelope = if (recipientKey != null) {
-            buildSealedEnvelope(messageId, beaconId, recipientKey, message)
+            buildSealedEnvelope(messageId, beaconId, recipientKey, message, messageType)
         } else {
             null
         }
@@ -748,7 +891,9 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                     timestamp = System.currentTimeMillis(),
                     direction = "OUTBOUND",
                     status = if (delivered) "SENT" else "PENDING_RELAY",
-                    isBroadcast = false
+                    isBroadcast = false,
+                    isRead = true,
+                    messageType = messageType
                 )
             )
             notifyMessageStored(beaconId)
@@ -759,11 +904,18 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         messageId: String,
         recipientBeaconId: Int,
         recipientStaticKey: ByteArray,
-        message: String
+        message: String,
+        messageType: String = MessageType.TEXT
     ): uniffi.meshlink_core.MessageEnvelope? {
         val sealed = staticKeys.seal(recipientStaticKey, message.toByteArray())
         if (sealed.isEmpty()) {
             Log.e(TAG, "Failed to seal message for node $recipientBeaconId")
+            return null
+        }
+        // Anything inline travels across hops, so it has to stay small enough not
+        // to crowd out ordinary messages on the relays carrying it.
+        if (sealed.size > MAX_INLINE_PAYLOAD_BYTES) {
+            Log.e(TAG, "Payload of ${sealed.size}B exceeds the ${MAX_INLINE_PAYLOAD_BYTES}B inline limit")
             return null
         }
         return signed(
@@ -773,10 +925,26 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                 recipientId = recipientBeaconId.toUInt(),
                 payload = sealed,
                 priority = uniffi.meshlink_core.Priority.DIRECT,
-                payloadType = uniffi.meshlink_core.PayloadType.TEXT
+                payloadType = payloadTypeFor(messageType)
             )
         )
     }
+
+    /** Maps a stored message kind onto its wire payload type. */
+    private fun payloadTypeFor(messageType: String): uniffi.meshlink_core.PayloadType =
+        when (messageType) {
+            MessageType.STICKER -> uniffi.meshlink_core.PayloadType.STICKER_REF
+            MessageType.CONTACT -> uniffi.meshlink_core.PayloadType.CONTACT_CARD
+            else -> uniffi.meshlink_core.PayloadType.TEXT
+        }
+
+    /** Reverse of [payloadTypeFor], for storing what arrives. */
+    private fun messageTypeFor(payloadType: uniffi.meshlink_core.PayloadType): String =
+        when (payloadType) {
+            uniffi.meshlink_core.PayloadType.STICKER_REF -> MessageType.STICKER
+            uniffi.meshlink_core.PayloadType.CONTACT_CARD -> MessageType.CONTACT
+            else -> MessageType.TEXT
+        }
 
     /**
      * Broadcasts to the whole mesh. Broadcast has no single recipient and so no
@@ -913,7 +1081,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         if (recipient == uniffi.meshlink_core.broadcastRecipient().toInt()) return
         if (recipient == localBeaconId) return
         if (envelope.payloadType == uniffi.meshlink_core.PayloadType.ACK ||
-            envelope.payloadType == uniffi.meshlink_core.PayloadType.PRESENCE
+            envelope.payloadType == uniffi.meshlink_core.PayloadType.PRESENCE ||
+            envelope.payloadType == uniffi.meshlink_core.PayloadType.MEDIA_CHUNK
         ) return
         if (!peerManager.isKnown(recipient)) return
         if (peerManager.isReachable(recipient)) return
@@ -989,6 +1158,718 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         rememberOwnMessage(envelope.messageId)
         floodEnvelope(envelope, excludeAddress = null)
         Log.d(TAG, "Handed ${pending.messageId} to ${fresh.size} new carrier(s) for $recipient")
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Media
+    //
+    // The offer floods like any message, so a recipient learns a file is waiting
+    // even from several hops away. The bytes do not: they move only over a direct
+    // link, because flooding a file would consume more airtime on every relay
+    // than every text message the mesh carries in a day.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** Transfers this node is currently serving: mediaId to recipient beacon. */
+    private val outgoingTransfers = ConcurrentHashMap<String, Int>()
+
+    /** Which of those were sent under an emergency allowance. */
+    private val emergencyTransfers = ConcurrentHashMap<String, Boolean>()
+
+    /** Announces a local file to [beaconId] without sending any of it. */
+    private fun offerMedia(
+        beaconId: Int,
+        mediaId: String,
+        name: String,
+        mime: String,
+        emergency: Boolean
+    ) {
+        val file = MediaStore.fileFor(this, mediaId)
+        if (!file.exists()) {
+            Log.e(TAG, "Cannot offer $mediaId: file missing")
+            return
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            if (emergency && !canSpendEmergencyAllowance()) {
+                Log.w(TAG, "Emergency allowance exhausted; refusing to send $mediaId over hops")
+                sendBroadcast(
+                    Intent(ACTION_EMERGENCY_REFUSED).apply { setPackage(packageName) }
+                )
+                return@launch
+            }
+            if (emergency) {
+                AppDatabase.getDatabase(this@RelayService).emergencyUsageDao().record(
+                    EmergencyUsageEntity(
+                        nodeRow = beaconIdToRow(localBeaconId),
+                        kind = EmergencyKind.SEND,
+                        bytes = file.length(),
+                        usedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+
+            val offer = MediaProtocol.Offer(
+                mediaId = mediaId,
+                name = name,
+                mime = mime,
+                size = file.length(),
+                sha256 = MediaStore.sha256(file)
+            )
+
+            // Written here rather than by the UI so there is one writer per side,
+            // and so the row always carries this node's real id: the chat screen
+            // only learns that id from a roster broadcast, and before the first
+            // one arrives it would have stored a sender of 0.
+            AppDatabase.getDatabase(this@RelayService).messageDao().insertMessage(
+                MessageEntity(
+                    messageId = UUID.randomUUID().toString(),
+                    senderId = beaconIdToRow(localBeaconId),
+                    recipientId = beaconIdToRow(beaconId),
+                    plaintext = name,
+                    envelopeData = ByteArray(0),
+                    timestamp = System.currentTimeMillis(),
+                    direction = "OUTBOUND",
+                    status = "SENT",
+                    isBroadcast = false,
+                    isRead = true,
+                    messageType = if (mime.startsWith("image/")) MessageType.IMAGE else MessageType.FILE,
+                    mediaPath = mediaId,
+                    mediaMime = mime,
+                    mediaSize = file.length(),
+                    // The sender already holds the bytes.
+                    mediaState = MediaState.READY
+                )
+            )
+            notifyMessageStored(beaconId)
+
+            outgoingTransfers[mediaId] = beaconId
+            emergencyTransfers[mediaId] = emergency
+            sendControl(beaconId, offer.encode(), uniffi.meshlink_core.PayloadType.MEDIA_OFFER, emergency)
+            Log.i(TAG, "Offered $mediaId (${file.length()}B) to $beaconId, emergency=$emergency")
+        }
+    }
+
+    /** Accepts an offer, resuming from whatever was already received. */
+    private fun requestMedia(beaconId: Int, mediaId: String) {
+        val partial = MediaStore.fileFor(this, mediaId)
+        val offset = if (partial.exists()) partial.length() else 0L
+        sendControl(
+            beaconId,
+            MediaProtocol.Request(mediaId, offset).encode(),
+            uniffi.meshlink_core.PayloadType.MEDIA_REQUEST,
+            emergency = false
+        )
+        CoroutineScope(Dispatchers.IO).launch {
+            AppDatabase.getDatabase(this@RelayService).messageDao()
+                .updateMediaState(mediaId, MediaState.TRANSFERRING)
+            notifyMessageStored(beaconId)
+        }
+        Log.i(TAG, "Requested $mediaId from $beaconId at offset $offset")
+    }
+
+    /**
+     * Sends one small control payload. These are ordinary flooded messages.
+     */
+    private fun sendControl(
+        beaconId: Int,
+        payload: String,
+        payloadType: uniffi.meshlink_core.PayloadType,
+        emergency: Boolean
+    ) {
+        val key = peerManager.staticKeyFor(beaconId) ?: return
+        val sealed = staticKeys.seal(key, payload.toByteArray())
+        if (sealed.isEmpty()) return
+
+        val envelope = signed(
+            uniffi.meshlink_core.createEnvelope(
+                senderId = localBeaconId.toUInt(),
+                recipientId = beaconId.toUInt(),
+                payload = sealed,
+                priority = if (emergency) uniffi.meshlink_core.Priority.SOS
+                else uniffi.meshlink_core.Priority.DIRECT,
+                payloadType = payloadType
+            )
+        )
+        rememberOwnMessage(envelope.messageId)
+        floodEnvelope(envelope, excludeAddress = null)
+    }
+
+    /**
+     * Streams a file to a peer, one chunk per envelope, direct link only.
+     *
+     * Runs off the main thread and stops the moment the peer stops being a direct
+     * neighbour: a half-finished transfer is resumable, whereas spilling chunks
+     * into the flood would not be.
+     */
+    private fun serveMedia(beaconId: Int, mediaId: String, fromOffset: Long) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val file = MediaStore.fileFor(this@RelayService, mediaId)
+            if (!file.exists()) return@launch
+
+            val overHops = emergencyTransfers[mediaId] == true
+            var offset = fromOffset
+            while (offset < file.length()) {
+                if (!overHops && !isDirectNeighbour(beaconId)) {
+                    Log.w(TAG, "Peer $beaconId is no longer direct; pausing $mediaId at $offset")
+                    return@launch
+                }
+                val data = MediaStore.readRange(file, offset, MediaProtocol.CHUNK_BYTES)
+                if (data == null || data.isEmpty()) break
+
+                val key = peerManager.staticKeyFor(beaconId) ?: return@launch
+                val sealed = staticKeys.seal(
+                    key,
+                    MediaProtocol.encodeChunk(MediaProtocol.Chunk(mediaId, offset, data))
+                )
+                if (sealed.isEmpty()) return@launch
+
+                val envelope = signed(
+                    uniffi.meshlink_core.createEnvelope(
+                        senderId = localBeaconId.toUInt(),
+                        recipientId = beaconId.toUInt(),
+                        payload = sealed,
+                        // SOS marks the chunk as spending an emergency allowance,
+                        // which is the only thing that lets a relay carry it.
+                        priority = if (emergencyTransfers[mediaId] == true)
+                            uniffi.meshlink_core.Priority.SOS
+                        else uniffi.meshlink_core.Priority.BULK_MEDIA_NOTIFY,
+                        payloadType = uniffi.meshlink_core.PayloadType.MEDIA_CHUNK
+                    )
+                )
+                rememberOwnMessage(envelope.messageId)
+                val sent = if (overHops) floodEnvelope(envelope, excludeAddress = null) > 0
+                else sendDirect(beaconId, envelope)
+                if (!sent) {
+                    Log.w(TAG, "Direct send failed for $mediaId at $offset")
+                    return@launch
+                }
+                offset += data.size
+            }
+
+            sendControl(
+                beaconId,
+                MediaProtocol.Complete(mediaId, ok = true).encode(),
+                uniffi.meshlink_core.PayloadType.MEDIA_COMPLETE,
+                emergency = false
+            )
+            Log.i(TAG, "Finished serving $mediaId to $beaconId")
+        }
+    }
+
+    /**
+     * Whether this node will carry [envelope] onward.
+     *
+     * Everything is relayable except media chunks, which are confined to direct
+     * links — unless the sender marked the transfer as an emergency, which is the
+     * one case where bulk is permitted to cross hops and is rationed separately.
+     */
+    private fun isRelayable(envelope: uniffi.meshlink_core.MessageEnvelope): Boolean {
+        if (envelope.payloadType != uniffi.meshlink_core.PayloadType.MEDIA_CHUNK) return true
+        if (envelope.priority != uniffi.meshlink_core.Priority.SOS) return false
+
+        // Emergency bulk is allowed across hops, but only so much of it per
+        // sender. The check is against a budget this device keeps itself, so it
+        // holds even if the sender's own client was modified to ignore its limit.
+        val senderRow = beaconIdToRow(envelope.senderId.toInt())
+        val spent = emergencyRelayBytes.getOrDefault(senderRow, 0L)
+        if (spent >= EMERGENCY_RELAY_BYTES_PER_WINDOW) {
+            Log.w(TAG, "Emergency relay budget exhausted for ${envelope.senderId}; not carrying bulk")
+            return false
+        }
+
+        val size = envelope.encryptedPayload.size.toLong()
+        emergencyRelayBytes[senderRow] = spent + size
+        CoroutineScope(Dispatchers.IO).launch {
+            AppDatabase.getDatabase(this@RelayService).emergencyUsageDao().record(
+                EmergencyUsageEntity(
+                    nodeRow = senderRow,
+                    kind = EmergencyKind.RELAY,
+                    bytes = size,
+                    usedAt = System.currentTimeMillis()
+                )
+            )
+        }
+        return true
+    }
+
+    /** Relay budget spent per sender in this window, mirrored for fast checks. */
+    private val emergencyRelayBytes = ConcurrentHashMap<Long, Long>()
+
+    /** Rebuilds the relay budget from the ledger, and prunes what has aged out. */
+    private fun refreshEmergencyBudgets() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val dao = AppDatabase.getDatabase(this@RelayService).emergencyUsageDao()
+            val now = System.currentTimeMillis()
+            dao.prune(now - EMERGENCY_WINDOW_MS)
+            emergencyRelayBytes.clear()
+            peerManager.getReachableNodes().forEach { node ->
+                val row = beaconIdToRow(node.beaconId)
+                val spent = dao.relayedBytesSince(row, now - EMERGENCY_WINDOW_MS, now)
+                if (spent > 0) emergencyRelayBytes[row] = spent
+            }
+        }
+    }
+
+    /**
+     * Whether this node may start another emergency transfer.
+     *
+     * Purely local and purely advisory to the sender - the relays enforce their
+     * own limit regardless - but it is what makes the allowance mean something
+     * for an honest client, and what the UI reports.
+     */
+    private suspend fun canSpendEmergencyAllowance(): Boolean {
+        val dao = AppDatabase.getDatabase(this@RelayService).emergencyUsageDao()
+        val now = System.currentTimeMillis()
+        val used = dao.sendsSince(beaconIdToRow(localBeaconId), now - EMERGENCY_WINDOW_MS, now)
+        return used < EMERGENCY_SENDS_PER_WINDOW
+    }
+
+    private fun isDirectNeighbour(beaconId: Int): Boolean =
+        peerManager.getConnectedPeers().any { it.beaconId == beaconId }
+
+    /**
+     * Sends to one node over a direct link only, never flooding.
+     *
+     * This is what keeps bulk traffic off the relays: if the recipient is not a
+     * neighbour right now the chunk simply is not sent, and the transfer resumes
+     * when it is.
+     */
+    private fun sendDirect(beaconId: Int, envelope: uniffi.meshlink_core.MessageEnvelope): Boolean {
+        val bytes = uniffi.meshlink_core.serializeEnvelope(envelope)
+        return peerManager.getConnectedPeers()
+            .filter { it.beaconId == beaconId }
+            .any { sendToNeighbor(it.address, bytes) }
+    }
+
+    /** Handles every media control payload arriving for this node. */
+    private fun handleMediaPayload(
+        envelope: uniffi.meshlink_core.MessageEnvelope,
+        senderId: Int
+    ) {
+        when (envelope.payloadType) {
+            uniffi.meshlink_core.PayloadType.MEDIA_OFFER -> {
+                val body = openPayload(envelope) ?: return
+                val offer = MediaProtocol.Offer.decode(body) ?: return
+                recordIncomingOffer(senderId, offer, envelope.messageId)
+            }
+            uniffi.meshlink_core.PayloadType.MEDIA_REQUEST -> {
+                val body = openPayload(envelope) ?: return
+                val request = MediaProtocol.Request.decode(body) ?: return
+                Log.i(TAG, "Serving ${request.mediaId} to $senderId from ${request.offset}")
+                serveMedia(senderId, request.mediaId, request.offset)
+            }
+            uniffi.meshlink_core.PayloadType.MEDIA_CHUNK -> {
+                val raw = openPayloadBytes(envelope) ?: return
+                val chunk = MediaProtocol.decodeChunk(raw) ?: return
+                appendChunk(chunk)
+            }
+            uniffi.meshlink_core.PayloadType.MEDIA_COMPLETE -> {
+                val body = openPayload(envelope) ?: return
+                val complete = MediaProtocol.Complete.decode(body) ?: return
+                finishIncoming(senderId, complete.mediaId)
+            }
+            else -> Unit
+        }
+    }
+
+    private fun recordIncomingOffer(
+        senderId: Int,
+        offer: MediaProtocol.Offer,
+        messageId: String
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val kind = if (offer.mime.startsWith("image/")) MessageType.IMAGE else MessageType.FILE
+            AppDatabase.getDatabase(this@RelayService).messageDao().insertMessage(
+                MessageEntity(
+                    messageId = messageId,
+                    senderId = beaconIdToRow(senderId),
+                    recipientId = beaconIdToRow(localBeaconId),
+                    plaintext = offer.name,
+                    envelopeData = ByteArray(0),
+                    timestamp = System.currentTimeMillis(),
+                    direction = "INBOUND",
+                    status = "RECEIVED",
+                    isBroadcast = false,
+                    messageType = kind,
+                    mediaPath = offer.mediaId,
+                    mediaMime = offer.mime,
+                    mediaSize = offer.size,
+                    // Not fetched yet: the user decides whether to spend the link on it.
+                    mediaState = MediaState.OFFERED
+                )
+            )
+            incomingOffers[offer.mediaId] = offer
+            notifyMessageStored(senderId)
+            showMessageNotification(senderId, "📎 ${offer.name}", false)
+        }
+    }
+
+    /** Offers seen but not yet completed, needed to verify the finished file. */
+    private val incomingOffers = ConcurrentHashMap<String, MediaProtocol.Offer>()
+
+    private fun appendChunk(chunk: MediaProtocol.Chunk) {
+        val file = MediaStore.fileFor(this, chunk.mediaId)
+        // Offsets must line up: a gap would silently corrupt the file, so an
+        // out-of-order chunk is dropped and the transfer resumes from the end of
+        // what is already on disk.
+        val current = if (file.exists()) file.length() else 0L
+        if (chunk.offset != current) {
+            Log.w(TAG, "Chunk for ${chunk.mediaId} at ${chunk.offset} expected $current; ignoring")
+            return
+        }
+        MediaStore.appendRange(file, chunk.data)
+    }
+
+    private fun finishIncoming(senderId: Int, mediaId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val file = MediaStore.fileFor(this@RelayService, mediaId)
+            val offer = incomingOffers[mediaId]
+            val ok = file.exists() &&
+                (offer == null || offer.sha256.isEmpty() || MediaStore.sha256(file) == offer.sha256)
+
+            val dao = AppDatabase.getDatabase(this@RelayService).messageDao()
+            dao.updateMediaState(mediaId, if (ok) MediaState.READY else MediaState.FAILED)
+            if (!ok) {
+                // A corrupt file is worse than none: drop it so a retry starts clean.
+                MediaStore.delete(this@RelayService, mediaId)
+                Log.e(TAG, "Checksum mismatch for $mediaId; discarded")
+            } else {
+                Log.i(TAG, "Received $mediaId intact (${file.length()}B)")
+            }
+            incomingOffers.remove(mediaId)
+            notifyMessageStored(senderId)
+        }
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Groups
+    //
+    // A group message is one flooded envelope encrypted with the group's shared
+    // key. Cost is therefore independent of membership size, and nodes outside
+    // the group cannot open it. Only the invite - which carries that key - is
+    // sealed individually, per member.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun groupDao() = AppDatabase.getDatabase(this).groupDao()
+
+    private fun createGroup(name: String, memberRows: List<Long>) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val creator = beaconIdToRow(localBeaconId)
+            val members = (memberRows + creator).distinct().take(GroupProtocol.MAX_MEMBERS)
+
+            val group = GroupEntity(
+                groupId = GroupProtocol.newGroupId(),
+                name = name,
+                groupKey = GroupProtocol.newGroupKey(),
+                keyVersion = 1,
+                rosterVersion = 1,
+                createdBy = creator,
+                joinedAt = System.currentTimeMillis()
+            )
+            groupDao().upsertGroup(group)
+            members.forEach { row ->
+                groupDao().upsertMember(
+                    GroupMemberEntity(group.groupId, row, displayNameFor(rowToBeaconId(row)), row == creator)
+                )
+            }
+
+            inviteMembers(group, groupDao().members(group.groupId))
+            Log.i(TAG, "Created group ${group.groupId} with ${members.size} member(s)")
+            notifyGroupChanged(group.groupId)
+        }
+    }
+
+    /** Sends each member the key and roster, sealed to them individually. */
+    private suspend fun inviteMembers(group: GroupEntity, members: List<GroupMemberEntity>) {
+        val invite = GroupProtocol.Invite(
+            groupId = group.groupId,
+            name = group.name,
+            groupKey = group.groupKey,
+            keyVersion = group.keyVersion,
+            rosterVersion = group.rosterVersion,
+            createdBy = group.createdBy,
+            members = members
+        ).encode()
+
+        members.forEach { member ->
+            val beaconId = rowToBeaconId(member.beaconRow)
+            if (beaconId == localBeaconId) return@forEach
+            sendControl(beaconId, invite, uniffi.meshlink_core.PayloadType.GROUP_INVITE, emergency = false)
+        }
+    }
+
+    /** Encrypts an inner payload with the group key and floods it once. */
+    private suspend fun sendToGroup(group: GroupEntity, inner: String) {
+        val nonce = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+        val sealed = uniffi.meshlink_core.encryptTransport(group.groupKey, nonce, inner.toByteArray())
+        if (sealed.isEmpty()) return
+
+        // The group id travels in the clear so a member can tell which key to
+        // try; the body itself stays unreadable to everyone else.
+        val payload = (group.groupId + "|").toByteArray() + nonce + sealed
+        val envelope = signed(
+            uniffi.meshlink_core.createEnvelope(
+                senderId = localBeaconId.toUInt(),
+                recipientId = uniffi.meshlink_core.broadcastRecipient(),
+                payload = payload,
+                priority = uniffi.meshlink_core.Priority.BROADCAST,
+                payloadType = uniffi.meshlink_core.PayloadType.GROUP_MESSAGE
+            )
+        )
+        rememberOwnMessage(envelope.messageId)
+        floodEnvelope(envelope, excludeAddress = null)
+    }
+
+    private fun sendGroupChat(groupId: String, body: String, messageType: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val group = groupDao().group(groupId) ?: return@launch
+            if (!group.isActive) return@launch
+
+            val messageId = UUID.randomUUID().toString()
+            AppDatabase.getDatabase(this@RelayService).messageDao().insertMessage(
+                MessageEntity(
+                    messageId = messageId,
+                    senderId = beaconIdToRow(localBeaconId),
+                    recipientId = 0L,
+                    plaintext = body,
+                    envelopeData = ByteArray(0),
+                    timestamp = System.currentTimeMillis(),
+                    direction = "OUTBOUND",
+                    status = "SENT",
+                    isBroadcast = false,
+                    isRead = true,
+                    messageType = messageType,
+                    groupId = groupId
+                )
+            )
+            sendToGroup(group, GroupProtocol.encodeChat(messageId, messageType, body))
+            notifyGroupChanged(groupId)
+        }
+    }
+
+    /**
+     * Applies a membership change and publishes it.
+     *
+     * Removing anyone rotates the key, so a removed member cannot read what is
+     * said afterwards even while still in radio range. Everyone remaining is
+     * re-invited with the new key.
+     */
+    private fun updateGroupRoster(groupId: String, memberRows: List<Long>, adminRows: Set<Long>) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val group = groupDao().group(groupId) ?: return@launch
+            if (!groupDao().isAdmin(groupId, beaconIdToRow(localBeaconId))) {
+                Log.w(TAG, "Refusing roster change for $groupId: not an admin here")
+                return@launch
+            }
+
+            val previous = groupDao().members(groupId).map { it.beaconRow }.toSet()
+            val next = memberRows.distinct().take(GroupProtocol.MAX_MEMBERS)
+            val removed = previous - next.toSet()
+
+            val rotated = removed.isNotEmpty()
+            val updated = group.copy(
+                rosterVersion = group.rosterVersion + 1,
+                keyVersion = if (rotated) group.keyVersion + 1 else group.keyVersion,
+                groupKey = if (rotated) GroupProtocol.newGroupKey() else group.groupKey
+            )
+
+            // Announce under the old key first, so the members being dropped learn
+            // they were removed rather than simply going silent.
+            sendToGroup(
+                group,
+                GroupProtocol.encodeRoster(
+                    updated.rosterVersion,
+                    updated.keyVersion,
+                    updated.name,
+                    next.map { GroupMemberEntity(groupId, it, displayNameFor(rowToBeaconId(it)), it in adminRows) }
+                )
+            )
+
+            groupDao().upsertGroup(updated)
+            groupDao().clearMembers(groupId)
+            next.forEach { row ->
+                groupDao().upsertMember(
+                    GroupMemberEntity(groupId, row, displayNameFor(rowToBeaconId(row)), row in adminRows)
+                )
+            }
+            if (rotated) inviteMembers(updated, groupDao().members(groupId))
+            Log.i(TAG, "Group $groupId roster v${updated.rosterVersion}, key v${updated.keyVersion}")
+            notifyGroupChanged(groupId)
+        }
+    }
+
+    /** Retracts a message for everyone, if this device is allowed to. */
+    private fun deleteGroupMessage(groupId: String, targetMessageId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val group = groupDao().group(groupId) ?: return@launch
+            val dao = AppDatabase.getDatabase(this@RelayService).messageDao()
+            val selfRow = beaconIdToRow(localBeaconId)
+            val admin = groupDao().isAdmin(groupId, selfRow)
+            val target = dao.getMessageById(targetMessageId)
+
+            // Admins may retract anything; anyone else only what they wrote.
+            if (!admin && target?.senderId != selfRow) {
+                Log.w(TAG, "Refusing to delete $targetMessageId: not admin and not the author")
+                return@launch
+            }
+
+            dao.markDeleted(targetMessageId, if (admin) DELETED_BY_ADMIN else DELETED_BY_AUTHOR)
+            sendToGroup(group, GroupProtocol.encodeDelete(targetMessageId, admin))
+            notifyGroupChanged(groupId)
+        }
+    }
+
+    private fun leaveGroup(groupId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val group = groupDao().group(groupId) ?: return@launch
+            sendToGroup(group, GroupProtocol.encodeLeave())
+            groupDao().removeMember(groupId, beaconIdToRow(localBeaconId))
+            groupDao().deactivate(groupId)
+            Log.i(TAG, "Left group $groupId")
+            notifyGroupChanged(groupId)
+        }
+    }
+
+    private fun notifyGroupChanged(groupId: String) {
+        sendBroadcast(
+            Intent(ACTION_MESSAGE_SENT).apply {
+                putExtra(EXTRA_GROUP_ID, groupId)
+                setPackage(packageName)
+            }
+        )
+    }
+
+    // ── Reception ───────────────────────────────────────────────────────────
+
+    private fun handleGroupInvite(envelope: uniffi.meshlink_core.MessageEnvelope, senderId: Int) {
+        val body = openPayload(envelope) ?: return
+        val invite = GroupProtocol.decodeInvite(body) ?: return
+        CoroutineScope(Dispatchers.IO).launch {
+            val existing = groupDao().group(invite.groupId)
+            // An invite is also how a key rotation arrives, so a lower version is
+            // stale and must not overwrite a newer key already held.
+            if (existing != null && existing.keyVersion > invite.keyVersion) return@launch
+
+            groupDao().upsertGroup(
+                GroupEntity(
+                    groupId = invite.groupId,
+                    name = invite.name,
+                    groupKey = invite.groupKey,
+                    keyVersion = invite.keyVersion,
+                    rosterVersion = invite.rosterVersion,
+                    createdBy = invite.createdBy,
+                    joinedAt = existing?.joinedAt ?: System.currentTimeMillis(),
+                    isActive = true
+                )
+            )
+            groupDao().clearMembers(invite.groupId)
+            invite.members.forEach { groupDao().upsertMember(it) }
+            Log.i(TAG, "Joined group ${invite.groupId} (key v${invite.keyVersion}) from $senderId")
+            notifyGroupChanged(invite.groupId)
+        }
+    }
+
+    private fun handleGroupMessage(envelope: uniffi.meshlink_core.MessageEnvelope, senderId: Int) {
+        val raw = envelope.encryptedPayload
+        val separator = raw.indexOf('|'.code.toByte())
+        if (separator <= 0 || raw.size < separator + 13) return
+        val groupId = String(raw, 0, separator)
+
+        CoroutineScope(Dispatchers.IO).launch {
+            // Not ours, or we hold no key for it: nothing to do, and nothing
+            // leaks either, since the body is unreadable without that key.
+            val group = groupDao().group(groupId) ?: return@launch
+            val nonce = raw.copyOfRange(separator + 1, separator + 13)
+            val body = raw.copyOfRange(separator + 13, raw.size)
+            val inner = uniffi.meshlink_core.decryptTransport(group.groupKey, nonce, body)
+                ?.let { String(it) } ?: return@launch
+
+            when (GroupProtocol.kindOf(inner)) {
+                GroupProtocol.KIND_CHAT -> storeGroupChat(group, inner, senderId)
+                GroupProtocol.KIND_ROSTER -> applyRemoteRoster(group, inner)
+                GroupProtocol.KIND_DELETE -> applyRemoteDelete(group, inner, senderId)
+                GroupProtocol.KIND_LEAVE -> {
+                    groupDao().removeMember(groupId, beaconIdToRow(senderId))
+                    notifyGroupChanged(groupId)
+                }
+            }
+        }
+    }
+
+    private suspend fun storeGroupChat(
+        group: GroupEntity,
+        inner: String,
+        senderId: Int
+    ) {
+        if (isBlocked(senderId)) return
+        val messageId = GroupProtocol.field(inner, "mid") ?: return
+        val body = GroupProtocol.field(inner, "body") ?: return
+        val type = GroupProtocol.field(inner, "mt") ?: MessageType.TEXT
+
+        AppDatabase.getDatabase(this).messageDao().insertMessage(
+            MessageEntity(
+                messageId = messageId,
+                senderId = beaconIdToRow(senderId),
+                recipientId = 0L,
+                plaintext = body,
+                envelopeData = ByteArray(0),
+                timestamp = System.currentTimeMillis(),
+                direction = "INBOUND",
+                status = "RECEIVED",
+                isBroadcast = false,
+                messageType = type,
+                groupId = group.groupId
+            )
+        )
+        showMessageNotification(senderId, "${group.name}: $body", false)
+        notifyGroupChanged(group.groupId)
+    }
+
+    /** Adopts a roster only if it is newer, which is how splits reconcile. */
+    private suspend fun applyRemoteRoster(group: GroupEntity, inner: String) {
+        val version = GroupProtocol.intField(inner, "rv")
+        if (version <= group.rosterVersion) return
+
+        val members = GroupProtocol.membersFrom(inner, group.groupId)
+        groupDao().upsertGroup(
+            group.copy(
+                name = GroupProtocol.field(inner, "name") ?: group.name,
+                rosterVersion = version
+            )
+        )
+        groupDao().clearMembers(group.groupId)
+        members.forEach { groupDao().upsertMember(it) }
+
+        // No longer listed: this device has been removed.
+        if (members.none { it.beaconRow == beaconIdToRow(localBeaconId) }) {
+            groupDao().deactivate(group.groupId)
+            Log.i(TAG, "Removed from group ${group.groupId}")
+        }
+        notifyGroupChanged(group.groupId)
+    }
+
+    private suspend fun applyRemoteDelete(group: GroupEntity, inner: String, senderId: Int) {
+        val target = GroupProtocol.field(inner, "mid") ?: return
+        val dao = AppDatabase.getDatabase(this).messageDao()
+        val senderRow = beaconIdToRow(senderId)
+        val claimsAdmin = GroupProtocol.boolField(inner, "admin")
+        val existing = dao.getMessageById(target) ?: return
+
+        // The claim is checked against the roster this device holds, so a member
+        // cannot delete someone else's message by asserting they are an admin.
+        val allowed = if (claimsAdmin) {
+            groupDao().isAdmin(group.groupId, senderRow)
+        } else {
+            existing.senderId == senderRow
+        }
+        if (!allowed) {
+            Log.w(TAG, "Ignoring unauthorised deletion of $target from $senderId")
+            return
+        }
+
+        dao.markDeleted(target, if (claimsAdmin) DELETED_BY_ADMIN else DELETED_BY_AUTHOR)
+        notifyGroupChanged(group.groupId)
     }
 
     /** Backs the next attempt off exponentially, capped at [RETRY_MAX_GAP_MS]. */
@@ -1102,6 +1983,14 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             deliverLocally(envelope)
         }
 
+        if (shouldRelay && !isRelayable(envelope)) {
+            // Bulk bytes stop here. Relaying a file would cost this device more
+            // airtime than every text message the mesh carries in a day, which is
+            // exactly what the direct-only rule exists to prevent.
+            Log.d(TAG, "Not relaying bulk payload ${envelope.messageId}")
+            return
+        }
+
         if (shouldRelay) {
             // TTL is decremented only now, immediately before forwarding, so the
             // hop count a receiver derives from it stays accurate.
@@ -1123,9 +2012,33 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             handleAcknowledgement(envelope)
             return
         }
+        if (envelope.payloadType == uniffi.meshlink_core.PayloadType.GROUP_INVITE) {
+            val senderId = envelope.senderId.toInt()
+            if (!isBlocked(senderId)) handleGroupInvite(envelope, senderId)
+            return
+        }
+        if (envelope.payloadType == uniffi.meshlink_core.PayloadType.GROUP_MESSAGE) {
+            handleGroupMessage(envelope, envelope.senderId.toInt())
+            return
+        }
+        if (envelope.payloadType in MEDIA_PAYLOAD_TYPES) {
+            val senderId = envelope.senderId.toInt()
+            if (!isBlocked(senderId)) handleMediaPayload(envelope, senderId)
+            return
+        }
 
         val senderId = envelope.senderId.toInt()
         val isBroadcast = envelope.priority == uniffi.meshlink_core.Priority.BROADCAST
+
+        if (isBlocked(senderId)) {
+            // Acknowledged before being dropped: the sender otherwise retries for
+            // a full day against a device that will never store the message, and
+            // a permanently undelivered tick would advertise the block anyway.
+            // Relaying for this node continues untouched — see onMessageReceived.
+            if (!isBroadcast) acknowledge(senderId, envelope.messageId)
+            Log.i(TAG, "Discarded message from blocked node $senderId")
+            return
+        }
 
         if (!isBroadcast && peerManager.staticKeyFor(senderId) == null) {
             deferUntilSenderKnown(senderId, envelope)
@@ -1149,7 +2062,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                     timestamp = System.currentTimeMillis(),
                     direction = "INBOUND",
                     status = "RECEIVED",
-                    isBroadcast = isBroadcast
+                    isBroadcast = isBroadcast,
+                    messageType = messageTypeFor(envelope.payloadType)
                 )
             )
 
@@ -1177,6 +2091,12 @@ class RelayService : Service(), GattServerListener, GattClientListener {
      * single recipient to seal against; direct messages are opened with the
      * sender's static key, which also proves the sender is who it claims to be.
      */
+    /** Raw sealed bytes, for payloads that are not text. */
+    private fun openPayloadBytes(envelope: uniffi.meshlink_core.MessageEnvelope): ByteArray? {
+        val senderKey = peerManager.staticKeyFor(envelope.senderId.toInt()) ?: return null
+        return staticKeys.open(senderKey, envelope.encryptedPayload)
+    }
+
     private fun openPayload(envelope: uniffi.meshlink_core.MessageEnvelope): String? {
         if (envelope.priority == uniffi.meshlink_core.Priority.BROADCAST) {
             return String(envelope.encryptedPayload)
@@ -1322,7 +2242,9 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
     /** Pushes the current reachable set to any listening activity. */
     private fun publishRoster() {
-        val nodes = peerManager.getReachableNodes()
+        // Blocked nodes stay in PeerManager so relaying and custody still work;
+        // they are only withheld from what the user sees.
+        val nodes = peerManager.getReachableNodes().filterNot { isBlocked(it.beaconId) }
         val intent = Intent(ACTION_ROSTER_UPDATED).apply {
             putExtra(EXTRA_LOCAL_ID, localBeaconId)
             putExtra(EXTRA_ROSTER_IDS, nodes.map { it.beaconId }.toIntArray())
@@ -1360,7 +2282,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                 if (bluetoothEnabled) "Relaying messages for the mesh network"
                 else "Bluetooth is off — turn it on to rejoin the mesh"
             )
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_notification_mesh)
+            .setColor(android.graphics.Color.parseColor(NOTIFICATION_ACCENT))
             .build()
 
     private fun updateNotification(bluetoothEnabled: Boolean) {
@@ -1368,22 +2291,34 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             .notify(NOTIFICATION_ID, createNotification(bluetoothEnabled))
     }
 
+    /** The launcher icon, shown alongside the notification so it reads as this app. */
+    private fun appIconBitmap(): android.graphics.Bitmap? =
+        runCatching {
+            ContextCompat.getDrawable(this, R.mipmap.ic_launcher)?.toBitmap(128, 128)
+        }.getOrNull()
+
     private fun showMessageNotification(senderId: Int, message: String, isBroadcast: Boolean) {
         val senderName = displayNameFor(senderId)
         val title = if (isBroadcast) "Broadcast from $senderName" else "Message from $senderName"
 
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            // Tapping the notification should land on that conversation, which is
+            // also what clears its unread badge.
+            if (!isBroadcast) putExtra(MainActivity.EXTRA_OPEN_PEER, beaconIdToRow(senderId))
         }
         val pendingIntent = android.app.PendingIntent.getActivity(
-            this, 0, intent,
+            this, senderId, intent,
             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
         )
 
         val notification = Notification.Builder(this, MESSAGE_CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(message)
-            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setSmallIcon(R.drawable.ic_notification_message)
+            .setColor(android.graphics.Color.parseColor(NOTIFICATION_ACCENT))
+            .setLargeIcon(appIconBitmap())
+            .setStyle(Notification.BigTextStyle().bigText(message))
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()

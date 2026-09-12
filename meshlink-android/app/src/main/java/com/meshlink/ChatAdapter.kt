@@ -6,10 +6,14 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.meshlink.db.MessageEntity
+import com.meshlink.db.MediaState
+import com.meshlink.db.MessageType
 import java.text.SimpleDateFormat
 import java.util.*
 
 class ChatAdapter(
+    /** Tapping an attachment fetches it, or opens it once it has arrived. */
+    private val onAttachmentClick: (MessageEntity) -> Unit = {},
     private val onMessageLongClick: (MessageEntity) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
@@ -105,14 +109,17 @@ class ChatAdapter(
 
     inner class SentMessageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val tvMessage: TextView = itemView.findViewById(R.id.tvMessage)
+        private val ivPreview: android.widget.ImageView = itemView.findViewById(R.id.ivMediaPreview)
         private val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
         private val tvStatus: TextView = itemView.findViewById(R.id.tvStatus)
         private val tvDateHeader: TextView = itemView.findViewById(R.id.tvDateHeader)
 
         init {
             itemView.setOnClickListener {
-                if (isSelectionMode) {
-                    onMessageLongClick(messages[adapterPosition])
+                val message = messages.getOrNull(adapterPosition) ?: return@setOnClickListener
+                when {
+                    isSelectionMode -> onMessageLongClick(message)
+                    message.mediaPath != null -> onAttachmentClick(message)
                 }
             }
             itemView.setOnLongClickListener {
@@ -122,7 +129,7 @@ class ChatAdapter(
         }
 
         fun bind(message: MessageEntity) {
-            tvMessage.text = message.plaintext
+            bindMessageBody(tvMessage, ivPreview, message)
             tvTimestamp.text = dateFormat.format(Date(message.timestamp))
             tvStatus.text = when (message.status) {
                 "SENT" -> "✓"
@@ -148,13 +155,16 @@ class ChatAdapter(
 
     inner class ReceivedMessageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val tvMessage: TextView = itemView.findViewById(R.id.tvMessage)
+        private val ivPreview: android.widget.ImageView = itemView.findViewById(R.id.ivMediaPreview)
         private val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
         private val tvDateHeader: TextView = itemView.findViewById(R.id.tvDateHeader)
 
         init {
             itemView.setOnClickListener {
-                if (isSelectionMode) {
-                    onMessageLongClick(messages[adapterPosition])
+                val message = messages.getOrNull(adapterPosition) ?: return@setOnClickListener
+                when {
+                    isSelectionMode -> onMessageLongClick(message)
+                    message.mediaPath != null -> onAttachmentClick(message)
                 }
             }
             itemView.setOnLongClickListener {
@@ -164,7 +174,7 @@ class ChatAdapter(
         }
 
         fun bind(message: MessageEntity) {
-            tvMessage.text = message.plaintext
+            bindMessageBody(tvMessage, ivPreview, message)
             tvTimestamp.text = dateFormat.format(Date(message.timestamp))
             if (message.isStarred) tvTimestamp.text = "★ " + tvTimestamp.text
             
@@ -180,4 +190,110 @@ class ChatAdapter(
             }
         }
     }
+}
+
+/**
+ * Renders a message body according to its kind.
+ *
+ * Stickers are shown as a large glyph with no bubble text styling, and contacts
+ * as a readable card rather than raw vCard markup - the wire format should never
+ * be what the user reads.
+ */
+internal fun bindMessageBody(
+    view: TextView,
+    preview: android.widget.ImageView,
+    message: MessageEntity
+) {
+    preview.setImageDrawable(null)
+    preview.visibility = View.GONE
+
+    if (message.isDeleted) {
+        // The row is kept so the gap is visible; the original content is gone.
+        view.text = message.plaintext
+        view.textSize = 15f
+        view.alpha = 0.6f
+        return
+    }
+    view.alpha = 1f
+
+    when (message.messageType) {
+        MessageType.STICKER -> {
+            view.text = Stickers.glyphFor(message.plaintext)
+            view.textSize = 48f
+        }
+        MessageType.CONTACT -> {
+            val card = ContactCard.parse(message.plaintext)
+            view.text = if (card == null) {
+                "👤 Contact"
+            } else {
+                "👤 ${card.name}" + (card.phone?.let { "\n$it" } ?: "")
+            }
+            view.textSize = 16f
+        }
+        MessageType.IMAGE, MessageType.FILE -> {
+            val isImage = message.messageType == MessageType.IMAGE
+            val arrived = message.mediaState == MediaState.READY
+            val thumbnail = if (isImage && arrived) {
+                loadThumbnail(preview.context, message.mediaPath)
+            } else {
+                null
+            }
+
+            if (thumbnail != null) {
+                preview.setImageBitmap(thumbnail)
+                preview.visibility = View.VISIBLE
+            }
+
+            // Once the picture itself is on screen, repeating its name above the
+            // size is noise; the label shrinks to just what the image cannot say.
+            view.text = when {
+                thumbnail != null -> formatSize(message.mediaSize)
+                else -> {
+                    val icon = if (isImage) "🖼️" else "📎"
+                    val state = when (message.mediaState) {
+                        MediaState.OFFERED -> "Tap to download · ${formatSize(message.mediaSize)}"
+                        MediaState.TRANSFERRING -> "Downloading…"
+                        MediaState.FAILED -> "Failed · tap to retry"
+                        else -> formatSize(message.mediaSize)
+                    }
+                    "$icon ${message.plaintext}\n$state"
+                }
+            }
+            view.textSize = if (thumbnail != null) 11f else 16f
+        }
+        else -> {
+            view.text = message.plaintext
+            view.textSize = 16f
+        }
+    }
+}
+
+/**
+ * Decodes a downscaled thumbnail for the bubble.
+ *
+ * Sampled down on decode rather than loaded whole: a list that decodes every
+ * attachment at full size scrolls badly and can exhaust memory on older phones.
+ */
+private fun loadThumbnail(context: android.content.Context, mediaId: String?): android.graphics.Bitmap? {
+    if (mediaId == null) return null
+    return runCatching {
+        val file = MediaStore.fileFor(context, mediaId)
+        if (!file.exists()) return null
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        if (longest <= 0) return null
+
+        val options = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = generateSequence(1) { it * 2 }.first { longest / it <= 512 }
+        }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+    }.getOrNull()
+}
+
+private fun formatSize(bytes: Long): String = when {
+    bytes <= 0 -> ""
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+    else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
 }

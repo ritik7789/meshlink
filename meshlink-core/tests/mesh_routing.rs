@@ -482,3 +482,66 @@ fn an_acknowledgement_names_the_message_it_settles_in_the_clear() {
     assert!(meshlink_core::verify_envelope(signed, alice.public_key()));
     assert!(!meshlink_core::verify_envelope(forged, alice.public_key()));
 }
+
+#[test]
+fn binary_encoding_keeps_attachments_close_to_their_real_size() {
+    // A 10 KB attachment is the inline ceiling, so the encoding overhead on it
+    // decides whether that limit means anything.
+    let payload = vec![0xA5u8; 10_240];
+    let envelope = MessageEnvelope::new(
+        111,
+        222,
+        payload.clone(),
+        Priority::Direct,
+        PayloadType::ContactCard,
+        INITIAL_TTL,
+    );
+
+    let encoded = envelope.serialize();
+    // JSON rendered each byte as an array element ("165," = four chars), pushing
+    // this past 40 KB and over the chunking limit.
+    assert!(
+        encoded.len() < payload.len() + 512,
+        "encoding added {} bytes of overhead",
+        encoded.len() - payload.len()
+    );
+
+    let decoded = MessageEnvelope::deserialize(encoded).expect("round-trips");
+    assert_eq!(decoded.encrypted_payload, payload);
+    assert_eq!(decoded.payload_type, PayloadType::ContactCard);
+}
+
+#[test]
+fn every_payload_type_survives_a_round_trip() {
+    for payload_type in [
+        PayloadType::Text,
+        PayloadType::Ack,
+        PayloadType::MediaOffer,
+        PayloadType::MediaRequest,
+        PayloadType::MediaChunk,
+        PayloadType::MediaComplete,
+        PayloadType::ContactCard,
+        PayloadType::StickerRef,
+        PayloadType::Sos,
+        PayloadType::Presence,
+    ] {
+        let mut envelope = MessageEnvelope::new(
+            1, 2, b"payload".to_vec(), Priority::Direct, payload_type.clone(), INITIAL_TTL,
+        );
+        envelope.ack_for = Some("some-id".into());
+        let decoded = MessageEnvelope::deserialize(envelope.serialize()).expect("round-trips");
+        assert_eq!(decoded.payload_type, payload_type);
+        assert_eq!(decoded.ack_for.as_deref(), Some("some-id"));
+    }
+}
+
+#[test]
+fn only_media_chunks_count_as_bulk() {
+    // Offers must flood so an absent recipient still learns a file is waiting;
+    // only the bytes are restricted to direct links.
+    assert!(PayloadType::MediaChunk.is_bulk());
+    assert!(!PayloadType::MediaOffer.is_bulk());
+    assert!(!PayloadType::ContactCard.is_bulk());
+    assert!(!PayloadType::StickerRef.is_bulk());
+    assert!(!PayloadType::Text.is_bulk());
+}

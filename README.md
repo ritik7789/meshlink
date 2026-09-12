@@ -11,6 +11,8 @@
 - 🔒 **End-to-End Encryption**: Direct messages are sealed with **X25519** against the *recipient's* long-lived key, so relays forward ciphertext they cannot read. Each BLE hop is separately encrypted with **ChaCha20-Poly1305** using an ephemeral handshake, and identities are **Ed25519**.
 - 🆔 **Stable Node Identity**: A node's mesh address is derived from its persisted identity key, so it survives app and service restarts along with its conversation history.
 - 🔄 **Dual-Role BLE Operation**: Every device simultaneously operates as a BLE Peripheral (advertising service presence) and BLE Central (scanning & initiating connections). A single link carries traffic both ways — GATT writes one direction, indications the other — so a relay can forward over a link the *peer* established.
+- 📎 **Attachments in three tiers**: stickers and contact cards are small enough to flood across hops like text; photos are announced by a tiny offer and transferred **only over a direct link**, so a file never loads the relays; and an **emergency allowance** (twice a week) lets bulk cross hops when it genuinely matters.
+- 🚫 **Blocking that does not break the mesh**: a blocked node's messages are acknowledged and discarded locally and hidden from your roster, while your device keeps relaying and carrying their traffic for everyone else. Unblock from the overflow menu.
 - 🛡️ **Anti-Replay & Deduplication**: Built-in deduplication cache (`DedupCache`) plus a TTL budget and an originator check prevent flood loops, even in topologies with redundant paths.
 - ⚡ **Android Foreground Relay Service**: Background processing managed by an Android Foreground Service (`RelayService.kt`) with periodic BLE scan cycling to maintain active mesh discovery.
 - 💾 **Local Offline Persistence**: Room database integration (`AppDatabase`) for message queuing, persistent logs, and offline message storage.
@@ -41,8 +43,31 @@ The system is split into two primary components:
 - **`envelope.rs`**: Binary packet envelope layout with sender/recipient IDs, message priority, and TTL.
 - **`handshake.rs`**: Handshake verification and session key negotiation.
 - **`dedup.rs`**: Deduplication cache to drop duplicate packets across mesh hops.
+- Envelopes are encoded with **postcard**, not JSON: a byte payload under JSON became an array of numbers roughly four times its real size, which put the practical attachment limit near 30 KB.
 - **`router.rs`**: The forwarding decision for every received packet — deliver, relay, both, or drop.
 - **UniFFI Scaffolding**: Auto-generates type-safe Kotlin bindings (`meshlink_core.kt`) and native shared objects (`.so`) for Android architectures (`arm64-v8a`, `armeabi-v7a`, `x86_64`).
+
+### How attachments are carried
+
+Flooding suits text and is ruinous for files: a photo flooded across a mesh
+costs every relay more airtime than a day of messages. Attachments are therefore
+split by size.
+
+| Tier | Path | Limit |
+|---|---|---|
+| Stickers, contact cards, small files | Flooded over hops, like text | 10 KB sealed |
+| Photos and files | Offer floods; **bytes go direct only** | 512 KB after downscaling |
+| Emergency | Bytes permitted over hops | 2 per rolling 7 days |
+
+A sticker is sent as a pack reference such as `core:7`, a handful of bytes rather
+than an image, so it costs no more than a short message. Photos are downscaled to
+a 1024 px long edge before sending, which typically turns a multi-megabyte photo
+into 50-150 KB and is the single largest factor in whether a transfer completes
+over BLE. Transfers are resumable and verified against a SHA-256 from the offer.
+
+The emergency allowance is enforced twice over: the sending app limits itself,
+and every relay independently caps how much bulk it will carry for any one
+sender, so a modified client still cannot conscript other people's radios.
 
 ### How routing works
 
@@ -75,6 +100,8 @@ cd meshlink-core && cargo test
 - **`GattServer.kt`**: Manages incoming GATT client connections, GATT service definitions, and characteristic writes/reads.
 - **`GattClient.kt`**: Initiates outbound connections to discovered BLE peers and streams chunked message payloads.
 - **`LinkCodec.kt`**: Per-hop framing shared by both GATT directions — link encryption, chunking, and reassembly.
+- **`MediaStore.kt` / `MediaProtocol.kt`**: Attachment storage, image downscaling, and the offer/request/chunk/complete handshake.
+- **`Stickers.kt` / `ContactCard.kt`**: The built-in sticker packs and vCard handling for the inline tier.
 - **`PeerManager.kt`**: Tracks two things separately: *neighbours* (live BLE links, the set a flood is sent across) and the *roster* (every node presence gossip says is reachable, with its distance in hops).
 - **`MainActivity.kt`**: Responsive UI displaying peer statuses, interactive node chat, and broadcast controls.
 

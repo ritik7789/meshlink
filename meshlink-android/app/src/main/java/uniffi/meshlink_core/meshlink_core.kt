@@ -3038,7 +3038,47 @@ enum class PayloadType {
     
     TEXT,
     ACK,
+    /**
+     * Small descriptor of a file the sender is offering: id, type, size, hash
+     * and a thumbnail. Floods like a message; the bytes themselves do not.
+     */
     MEDIA_OFFER,
+    /**
+     * Recipient asking for a specific byte range of an offered file.
+     */
+    MEDIA_REQUEST,
+    /**
+     * One slice of an offered file. Direct links only, never relayed, unless
+     * the sender spent an emergency allowance.
+     */
+    MEDIA_CHUNK,
+    /**
+     * Sender signalling that every chunk has been sent.
+     */
+    MEDIA_COMPLETE,
+    /**
+     * A contact card, small enough to travel inline like text.
+     */
+    CONTACT_CARD,
+    /**
+     * Reference to a sticker in a pack shipped inside the app, so sending one
+     * costs a few bytes rather than an image transfer.
+     */
+    STICKER_REF,
+    /**
+     * Hands one member the group's shared key and current roster, sealed to
+     * that member alone. Unicast, and re-sent to everyone still in the group
+     * whenever the key is rotated.
+     */
+    GROUP_INVITE,
+    /**
+     * Anything addressed to a group: chat, roster changes, deletions, leaves.
+     *
+     * Flooded once and encrypted with the group key, so one message costs the
+     * same airtime whether the group has three members or twenty-five, and
+     * nodes outside the group simply cannot open it.
+     */
+    GROUP_MESSAGE,
     SOS,
     /**
      * Node announcing itself to the whole mesh: carries its identity key, its

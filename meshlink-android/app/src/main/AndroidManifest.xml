@@ -38,5 +38,17 @@
         <!-- Foreground service for background relay (NFR-3.1.2) -->
         <service android:name=".RelayService" android:foregroundServiceType="connectedDevice|location" />
 
+        <!-- Grants a viewer app temporary access to one attachment, without
+             exposing app-private storage to anything else. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 </manifest>

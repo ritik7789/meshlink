@@ -8,10 +8,13 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [MessageEntity::class, CustodyEntity::class], version = 4, exportSchema = false)
+@Database(entities = [MessageEntity::class, CustodyEntity::class, BlockedNodeEntity::class, EmergencyUsageEntity::class, GroupEntity::class, GroupMemberEntity::class], version = 9, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun custodyDao(): CustodyDao
+    abstract fun blockedNodeDao(): BlockedNodeDao
+    abstract fun emergencyUsageDao(): EmergencyUsageDao
+    abstract fun groupDao(): GroupDao
 
     companion object {
         @Volatile
@@ -41,6 +44,92 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Adds read-state, so the unread badge can be cleared independently of delivery. */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN isRead INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** Adds the per-device block list. */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `blocked_nodes` (
+                        `beaconRow` INTEGER NOT NULL,
+                        `name` TEXT,
+                        `blockedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`beaconRow`)
+                    )
+                    """
+                )
+            }
+        }
+
+        /** Adds attachment support: message kind and media bookkeeping. */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN messageType TEXT NOT NULL DEFAULT 'TEXT'")
+                database.execSQL("ALTER TABLE messages ADD COLUMN mediaPath TEXT")
+                database.execSQL("ALTER TABLE messages ADD COLUMN mediaMime TEXT")
+                database.execSQL("ALTER TABLE messages ADD COLUMN mediaSize INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE messages ADD COLUMN mediaState TEXT")
+            }
+        }
+
+        /** Adds the emergency allowance ledgers. */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `emergency_usage` (
+                        `id` INTEGER NOT NULL,
+                        `nodeRow` INTEGER NOT NULL,
+                        `kind` TEXT NOT NULL,
+                        `bytes` INTEGER NOT NULL,
+                        `usedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """
+                )
+            }
+        }
+
+        /** Adds group chats, their membership, and message-level deletion. */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `groups` (
+                        `groupId` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `groupKey` BLOB NOT NULL,
+                        `keyVersion` INTEGER NOT NULL,
+                        `rosterVersion` INTEGER NOT NULL,
+                        `createdBy` INTEGER NOT NULL,
+                        `joinedAt` INTEGER NOT NULL,
+                        `isActive` INTEGER NOT NULL,
+                        PRIMARY KEY(`groupId`)
+                    )
+                    """
+                )
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `group_members` (
+                        `groupId` TEXT NOT NULL,
+                        `beaconRow` INTEGER NOT NULL,
+                        `name` TEXT,
+                        `isAdmin` INTEGER NOT NULL,
+                        PRIMARY KEY(`groupId`, `beaconRow`)
+                    )
+                    """
+                )
+                database.execSQL("ALTER TABLE messages ADD COLUMN groupId TEXT")
+                database.execSQL("ALTER TABLE messages ADD COLUMN isDeleted INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -48,7 +137,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "meshlink_database"
                 )
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

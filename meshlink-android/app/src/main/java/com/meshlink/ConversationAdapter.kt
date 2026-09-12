@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.meshlink.db.MessageEntity
+import com.meshlink.db.MessageType
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -20,6 +21,7 @@ import java.util.Locale
  */
 class ConversationAdapter(
     private val onConversationClick: (Long) -> Unit,
+    private val onGroupClick: (String) -> Unit,
     private val onConversationLongClick: (Long) -> Unit
 ) : RecyclerView.Adapter<ConversationAdapter.ViewHolder>() {
 
@@ -28,6 +30,9 @@ class ConversationAdapter(
 
     /** Reachable node id to its distance in hops. Absent means unreachable. */
     private val reachable = mutableMapOf<Long, Int>()
+
+    /** Group id to display name, so group threads are labelled properly. */
+    private val groupNames = mutableMapOf<String, String>()
 
     private val dateFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
     private val dateFormatDate = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
@@ -61,11 +66,34 @@ class ConversationAdapter(
         notifyDataSetChanged()
     }
 
+    fun setGroupNames(names: Map<String, String>) {
+        groupNames.clear()
+        groupNames.putAll(names)
+        notifyDataSetChanged()
+    }
+
     fun setReachableNodes(nodes: Map<Long, Int>) {
         reachable.clear()
         reachable.putAll(nodes)
         notifyDataSetChanged()
     }
+
+    private fun previewOf(message: MessageEntity): String = when {
+        message.isDeleted -> "🚫 " + message.plaintext
+        else -> previewByType(message)
+    }
+
+    private fun previewByType(message: MessageEntity): String = when (message.messageType) {
+        MessageType.STICKER -> Stickers.glyphFor(message.plaintext) + " Sticker"
+        MessageType.CONTACT -> "👤 " + (ContactCard.parse(message.plaintext)?.name ?: "Contact")
+        MessageType.IMAGE -> "🖼️ Photo"
+        MessageType.FILE -> "📎 " + (message.mediaMime ?: "File")
+        else -> message.plaintext
+    }
+
+    /** Group threads are keyed by their group, not by whoever spoke last. */
+    fun keyOf(message: MessageEntity): String =
+        message.groupId ?: peerIdOf(message).toString()
 
     private fun peerIdOf(message: MessageEntity): Long =
         if (message.direction == "OUTBOUND") message.recipientId else message.senderId
@@ -93,19 +121,36 @@ class ConversationAdapter(
 
         init {
             itemView.setOnClickListener {
-                conversations.getOrNull(adapterPosition)?.let {
-                    onConversationClick(peerIdOf(it))
+                conversations.getOrNull(adapterPosition)?.let { message ->
+                    message.groupId?.let { onGroupClick(it) } ?: onConversationClick(peerIdOf(message))
                 }
             }
             itemView.setOnLongClickListener {
-                conversations.getOrNull(adapterPosition)?.let {
-                    onConversationLongClick(peerIdOf(it))
+                conversations.getOrNull(adapterPosition)?.let { message ->
+                    if (message.groupId == null) onConversationLongClick(peerIdOf(message))
                 }
                 true
             }
         }
 
+        private fun bindGroup(lastMessage: MessageEntity, groupId: String) {
+            val name = groupNames[groupId] ?: "Group"
+            tvPeerName.text = name
+            tvAvatar.text = "\uD83D\uDC65"
+            (tvAvatar.background as GradientDrawable).setColor(Color.parseColor("#00A884"))
+            tvLastMessage.text = previewOf(lastMessage)
+            tvTimestamp.text = getRelativeDate(lastMessage.timestamp)
+            vOnlineStatus.backgroundTintList =
+                android.content.res.ColorStateList.valueOf(Color.parseColor("#4DCA59"))
+            tvUnreadCount.visibility = View.GONE
+        }
+
         fun bind(lastMessage: MessageEntity, peerId: Long) {
+            val groupId = lastMessage.groupId
+            if (groupId != null) {
+                bindGroup(lastMessage, groupId)
+                return
+            }
             val isBroadcastThread = lastMessage.isBroadcast && peerId == 0L
             val prefs = itemView.context.getSharedPreferences(
                 RelayService.PREFS_NAME, android.content.Context.MODE_PRIVATE
@@ -135,7 +180,9 @@ class ConversationAdapter(
             val colorIndex = (peerId % colors.size).toInt()
             (tvAvatar.background as GradientDrawable).setColor(Color.parseColor(colors[colorIndex]))
 
-            tvLastMessage.text = lastMessage.plaintext
+            // The list shows a human summary, never the wire payload: a sticker
+            // reference or raw vCard markup would be meaningless here.
+            tvLastMessage.text = previewOf(lastMessage)
             tvTimestamp.text = getRelativeDate(lastMessage.timestamp)
 
             val isOnline = isBroadcastThread || hops != null

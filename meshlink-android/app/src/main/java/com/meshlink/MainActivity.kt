@@ -34,7 +34,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
-    
+
+    companion object {
+        /** Row id of a conversation to open straight away, set by a notification tap. */
+        const val EXTRA_OPEN_PEER = "extra_open_peer"
+    }
+
     private val PERMISSION_REQUEST_CODE = 100
     
     private lateinit var tvStatus: TextView
@@ -93,7 +98,8 @@ class MainActivity : AppCompatActivity() {
                     applyBluetoothState()
                 }
                 RelayService.ACTION_MESSAGE_RECEIVED,
-                RelayService.ACTION_MESSAGE_SENT -> loadConversations()
+                RelayService.ACTION_MESSAGE_SENT,
+                ChatActivity.ACTION_CONVERSATION_READ -> loadConversations()
             }
         }
     }
@@ -113,8 +119,9 @@ class MainActivity : AppCompatActivity() {
             onConversationClick = { peerId ->
                 if (peerId != 0L) openChat(peerId)
             },
+            onGroupClick = { groupId -> openGroup(groupId) },
             onConversationLongClick = { peerId ->
-                showDeleteConversationDialog(peerId)
+                showConversationActions(peerId)
             }
         )
         
@@ -134,6 +141,15 @@ class MainActivity : AppCompatActivity() {
         setSupportActionBar(toolbar)
 
         checkAndRequestPermissions()
+
+        // Arrived from a notification tap: go straight to that conversation.
+        intent?.getLongExtra(EXTRA_OPEN_PEER, 0L)?.takeIf { it != 0L }?.let { openChat(it) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getLongExtra(EXTRA_OPEN_PEER, 0L).takeIf { it != 0L }?.let { openChat(it) }
     }
     
     override fun onStart() {
@@ -143,6 +159,7 @@ class MainActivity : AppCompatActivity() {
             addAction(RelayService.ACTION_BLUETOOTH_STATE)
             addAction(RelayService.ACTION_MESSAGE_RECEIVED)
             addAction(RelayService.ACTION_MESSAGE_SENT)
+            addAction(ChatActivity.ACTION_CONVERSATION_READ)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(serviceReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -265,13 +282,37 @@ class MainActivity : AppCompatActivity() {
     private fun loadConversations() {
         CoroutineScope(Dispatchers.IO).launch {
             val convos = db.messageDao().getConversationList()
+            val active = db.groupDao().activeGroups()
+            val groups = db.groupDao().allGroups().associate { it.groupId to it.name }
+
+            // A group exists the moment it is created, before anyone has spoken
+            // in it. Without a placeholder row it would be invisible until the
+            // first message, which makes creating one look like it failed.
+            val spoken = convos.mapNotNull { it.groupId }.toSet()
+            val placeholders = active.filterNot { spoken.contains(it.groupId) }.map { group ->
+                com.meshlink.db.MessageEntity(
+                    messageId = "group-placeholder-${'$'}{group.groupId}",
+                    senderId = 0L,
+                    recipientId = 0L,
+                    plaintext = "No messages yet",
+                    envelopeData = ByteArray(0),
+                    timestamp = group.joinedAt,
+                    direction = "INBOUND",
+                    status = "RECEIVED",
+                    isRead = true,
+                    groupId = group.groupId
+                )
+            }
+            val merged = (convos + placeholders).sortedByDescending { it.timestamp }
+
             withContext(Dispatchers.Main) {
-                conversationAdapter.setConversations(convos)
-                tvEmptyState.visibility = if (convos.isEmpty()) View.VISIBLE else View.GONE
+                conversationAdapter.setGroupNames(groups)
+                conversationAdapter.setConversations(merged)
+                tvEmptyState.visibility = if (merged.isEmpty()) View.VISIBLE else View.GONE
             }
             
             // Load unread counts
-            convos.forEach {
+            convos.filter { it.groupId == null }.forEach {
                 val peerId = if (it.direction == "OUTBOUND") it.recipientId else it.senderId
                 val unread = db.messageDao().getUnreadCount(peerId)
                 withContext(Dispatchers.Main) {
@@ -326,6 +367,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun openGroup(groupId: String) {
+        startActivity(Intent(this, ChatActivity::class.java).apply {
+            putExtra(ChatActivity.EXTRA_GROUP_ID, groupId)
+        })
+    }
+
     private fun openChat(peerId: Long) {
         startActivity(Intent(this, ChatActivity::class.java).apply {
             putExtra(ChatActivity.EXTRA_PEER_BEACON_ID, peerId)
@@ -345,6 +392,10 @@ class MainActivity : AppCompatActivity() {
             }
             R.id.action_starred_messages -> {
                 showStarredMessagesDialog()
+                true
+            }
+            R.id.action_blocked_nodes -> {
+                showBlockedNodesDialog()
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -397,31 +448,125 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Offers every node the mesh can currently reach, not just direct
-     * neighbours, with its distance shown so relayed peers are identifiable.
+     * Node picker: everything the mesh can reach, searchable, with broadcast
+     * given its own icon so it is distinguishable at a glance.
      */
     private fun showNewChatDialog() {
-        val targets = mutableListOf<Pair<String, Long>>()
-        targets.add(Pair("Broadcast to All", 0L))
+        val view = layoutInflater.inflate(R.layout.dialog_new_chat, null)
+        val list = view.findViewById<RecyclerView>(R.id.rvNodes)
+        val search = view.findViewById<EditText>(R.id.etNodeSearch)
+        val empty = view.findViewById<TextView>(R.id.tvNoNodes)
 
+        val dialog = AlertDialog.Builder(this).setView(view).create()
+        dialog.window?.setBackgroundDrawable(
+            android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+        )
+
+        val adapter = NodePickerAdapter { choice ->
+            dialog.dismiss()
+            when {
+                choice.isBroadcast -> showBroadcastDialog()
+                choice.isNewGroup -> showCreateGroupDialog()
+                else -> openChat(choice.beaconRow)
+            }
+        }
+        list.layoutManager = LinearLayoutManager(this)
+        list.adapter = adapter
+
+        adapter.submit(buildNodeChoices())
+        empty.visibility = if (adapter.isEmpty()) View.VISIBLE else View.GONE
+
+        search.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) {
+                adapter.filter(s?.toString().orEmpty())
+                empty.visibility = if (adapter.isEmpty()) View.VISIBLE else View.GONE
+            }
+
+            override fun beforeTextChanged(t: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(t: CharSequence?, a: Int, b: Int, c: Int) = Unit
+        })
+
+        dialog.show()
+    }
+
+    /** Broadcast first, then reachable nodes nearest-first. */
+    private fun buildNodeChoices(): List<NodeChoice> {
+        val choices = mutableListOf(
+            NodeChoice(beaconRow = 0L, name = "Broadcast to All", hops = 0, isBroadcast = true),
+            NodeChoice(beaconRow = -1L, name = "New group", hops = 0, isNewGroup = true)
+        )
         reachableNodes.entries
             .sortedWith(compareBy({ it.value }, { it.key }))
             .forEach { (peerId, hops) ->
-                val name = nodeNames[peerId] ?: defaultNodeName(rowToBeaconId(peerId))
-                val label = if (hops > 1) "$name — $hops hops away" else "$name — direct"
-                targets.add(Pair(label, peerId))
+                choices += NodeChoice(
+                    beaconRow = peerId,
+                    name = nodeNames[peerId] ?: defaultNodeName(rowToBeaconId(peerId)),
+                    hops = hops
+                )
             }
+        return choices
+    }
 
-        if (targets.size == 1) {
-            Toast.makeText(this, "No other nodes reachable yet", Toast.LENGTH_SHORT).show()
+    /**
+     * Group creation: a name and up to [GroupProtocol.MAX_MEMBERS] members.
+     *
+     * The cap exists so a busy group cannot crowd the mesh out; the creator
+     * counts toward it, so the picker offers one fewer.
+     */
+    private fun showCreateGroupDialog() {
+        val candidates = reachableNodes.keys.toList()
+        if (candidates.isEmpty()) {
+            Toast.makeText(this, "No nodes reachable to add", Toast.LENGTH_SHORT).show()
+            return
         }
+        val labels = candidates.map {
+            nodeNames[it] ?: defaultNodeName(rowToBeaconId(it))
+        }.toTypedArray()
+        val chosen = BooleanArray(candidates.size)
 
         AlertDialog.Builder(this)
-            .setTitle("New Chat")
-            .setItems(targets.map { it.first }.toTypedArray()) { _, which ->
-                val (_, peerId) = targets[which]
-                if (peerId == 0L) showBroadcastDialog() else openChat(peerId)
+            .setTitle("Add members (max ${GroupProtocol.MAX_MEMBERS - 1})")
+            .setMultiChoiceItems(labels, chosen) { dialog, which, isChecked ->
+                val selected = chosen.count { it }
+                if (isChecked && selected > GroupProtocol.MAX_MEMBERS - 1) {
+                    // Undo the tick that went over the limit rather than silently
+                    // dropping it later at send time.
+                    chosen[which] = false
+                    (dialog as AlertDialog).listView.setItemChecked(which, false)
+                    Toast.makeText(
+                        this,
+                        "A group can hold ${GroupProtocol.MAX_MEMBERS} members including you",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
+            .setPositiveButton("Next") { _, _ ->
+                val members = candidates.filterIndexed { index, _ -> chosen[index] }
+                if (members.isEmpty()) {
+                    Toast.makeText(this, "Pick at least one member", Toast.LENGTH_SHORT).show()
+                } else {
+                    promptGroupName(members)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promptGroupName(members: List<Long>) {
+        val input = EditText(this).apply { hint = "Group name" }
+        AlertDialog.Builder(this)
+            .setTitle("Name this group")
+            .setView(input)
+            .setPositiveButton("Create") { _, _ ->
+                val name = input.text.toString().trim().ifBlank { "Group" }
+                startService(Intent(this, RelayService::class.java).apply {
+                    action = RelayService.ACTION_CREATE_GROUP
+                    putExtra(RelayService.EXTRA_GROUP_NAME, name)
+                    putExtra(RelayService.EXTRA_GROUP_MEMBERS, members.toLongArray())
+                })
+                Toast.makeText(this, "Group created", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -441,6 +586,105 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /** Long-press menu for a conversation. */
+    private fun showConversationActions(peerId: Long) {
+        if (peerId == 0L) {
+            // The broadcast thread has no single counterpart to block.
+            showDeleteConversationDialog(peerId)
+            return
+        }
+        val name = peerDisplayName(peerId)
+        AlertDialog.Builder(this)
+            .setTitle(name)
+            .setItems(arrayOf("Delete conversation", "Block $name")) { _, which ->
+                when (which) {
+                    0 -> showDeleteConversationDialog(peerId)
+                    1 -> showBlockDialog(peerId, name)
+                }
+            }
+            .show()
+    }
+
+    private fun peerDisplayName(peerId: Long): String =
+        getSharedPreferences(RelayService.PREFS_NAME, MODE_PRIVATE)
+            .getString(peerNameKeyForRow(peerId), null)?.takeIf { it.isNotBlank() }
+            ?: defaultNodeName(rowToBeaconId(peerId))
+
+    private fun showBlockDialog(peerId: Long, name: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Block $name?")
+            .setMessage(
+                "You will stop receiving messages from $name, and this " +
+                    "conversation will be hidden from your node list.\n\n" +
+                    "Your device will keep relaying their messages for other " +
+                    "people, so blocking them does not cut them off from the mesh."
+            )
+            .setPositiveButton("Block") { _, _ ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    db.blockedNodeDao().block(
+                        com.meshlink.db.BlockedNodeEntity(peerId, name, System.currentTimeMillis())
+                    )
+                    notifyBlockListChanged()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "$name blocked", Toast.LENGTH_SHORT).show()
+                        loadConversations()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Lists blocked nodes and lets the user lift a block. */
+    private fun showBlockedNodesDialog() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val blocked = db.blockedNodeDao().all()
+            withContext(Dispatchers.Main) {
+                if (blocked.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "No blocked nodes", Toast.LENGTH_SHORT).show()
+                    return@withContext
+                }
+                val labels = blocked.map {
+                    it.name?.takeIf { n -> n.isNotBlank() }
+                        ?: defaultNodeName(rowToBeaconId(it.beaconRow))
+                }.toTypedArray()
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Blocked Nodes")
+                    .setItems(labels) { _, which -> confirmUnblock(blocked[which], labels[which]) }
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun confirmUnblock(node: com.meshlink.db.BlockedNodeEntity, label: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Unblock $label?")
+            .setMessage("You will start receiving messages from $label again.")
+            .setPositiveButton("Unblock") { _, _ ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    db.blockedNodeDao().unblock(node.beaconRow)
+                    notifyBlockListChanged()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "$label unblocked", Toast.LENGTH_SHORT).show()
+                        loadConversations()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** The relay service keeps the filter in memory; tell it to reload. */
+    private fun notifyBlockListChanged() {
+        startService(
+            Intent(this, RelayService::class.java).apply {
+                action = RelayService.ACTION_BLOCKLIST_CHANGED
+            }
+        )
     }
 
     private fun showDeleteConversationDialog(peerId: Long) {

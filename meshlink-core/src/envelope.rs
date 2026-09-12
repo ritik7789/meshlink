@@ -22,13 +22,44 @@ pub enum Priority {
 pub enum PayloadType {
     Text,
     Ack,
+    /// Small descriptor of a file the sender is offering: id, type, size, hash
+    /// and a thumbnail. Floods like a message; the bytes themselves do not.
     MediaOffer,
+    /// Recipient asking for a specific byte range of an offered file.
+    MediaRequest,
+    /// One slice of an offered file. Direct links only, never relayed, unless
+    /// the sender spent an emergency allowance.
+    MediaChunk,
+    /// Sender signalling that every chunk has been sent.
+    MediaComplete,
+    /// A contact card, small enough to travel inline like text.
+    ContactCard,
+    /// Reference to a sticker in a pack shipped inside the app, so sending one
+    /// costs a few bytes rather than an image transfer.
+    StickerRef,
+    /// Hands one member the group's shared key and current roster, sealed to
+    /// that member alone. Unicast, and re-sent to everyone still in the group
+    /// whenever the key is rotated.
+    GroupInvite,
+    /// Anything addressed to a group: chat, roster changes, deletions, leaves.
+    ///
+    /// Flooded once and encrypted with the group key, so one message costs the
+    /// same airtime whether the group has three members or twenty-five, and
+    /// nodes outside the group simply cannot open it.
+    GroupMessage,
     Sos,
     /// Node announcing itself to the whole mesh: carries its identity key, its
     /// static X25519 key and its display name. Flooded like a broadcast, which
     /// is what makes nodes visible to each other beyond one hop.
     Presence,
     TopologyHint,
+}
+
+impl PayloadType {
+    /// Whether this kind of payload carries bulk data that must not be flooded.
+    pub fn is_bulk(&self) -> bool {
+        matches!(self, PayloadType::MediaChunk)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -103,8 +134,14 @@ impl MessageEnvelope {
         envelope
     }
 
+    /// Compact binary encoding.
+    ///
+    /// JSON turned every payload byte into an array element averaging about four
+    /// bytes on the wire, which put the practical inline limit near 30 KB rather
+    /// than the 127 KB the chunking allows. Postcard writes byte sequences
+    /// verbatim, so a 10 KB attachment costs 10 KB.
     pub fn serialize(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_default()
+        postcard::to_allocvec(self).unwrap_or_default()
     }
 
     /// Excludes `ttl` and `signature`: the TTL changes at every hop, so signing
@@ -133,11 +170,11 @@ impl MessageEnvelope {
             ack_for: &self.ack_for,
         };
 
-        serde_json::to_vec(&payload).unwrap_or_default()
+        postcard::to_allocvec(&payload).unwrap_or_default()
     }
 
     pub fn deserialize(data: Vec<u8>) -> Option<MessageEnvelope> {
-        serde_json::from_slice(&data).ok()
+        postcard::from_bytes(&data).ok()
     }
 
     pub fn decrement_ttl(&mut self) -> bool {

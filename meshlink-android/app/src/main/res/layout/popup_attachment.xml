@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Attachment menu: a vertical list anchored just above the paperclip, rather than
+  a sheet that dims the whole screen. The conversation stays fully visible, and
+  the menu appears where the finger already is.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/attachPanel"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_attach_panel"
+    android:elevation="12dp"
+    android:minWidth="220dp"
+    android:orientation="vertical"
+    android:paddingTop="10dp"
+    android:paddingBottom="10dp">
+
+    <LinearLayout
+        android:id="@+id/optionPhoto"
+        style="@style/AttachmentRow">
+
+        <TextView
+            style="@style/AttachmentRowIcon"
+            android:background="@drawable/bg_attach_tile"
+            android:backgroundTint="#8E7CFF"
+            android:text="🖼" />
+
+        <TextView
+            style="@style/AttachmentRowLabel"
+            android:text="Photo" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/optionSticker"
+        style="@style/AttachmentRow">
+
+        <TextView
+            style="@style/AttachmentRowIcon"
+            android:background="@drawable/bg_attach_tile"
+            android:backgroundTint="#F2A33C"
+            android:text="😀" />
+
+        <TextView
+            style="@style/AttachmentRowLabel"
+            android:text="Sticker" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/optionContact"
+        style="@style/AttachmentRow">
+
+        <TextView
+            style="@style/AttachmentRowIcon"
+            android:background="@drawable/bg_attach_tile"
+            android:backgroundTint="#3FA9F5"
+            android:text="👤" />
+
+        <TextView
+            style="@style/AttachmentRowLabel"
+            android:text="Contact" />
+    </LinearLayout>
+</LinearLayout>

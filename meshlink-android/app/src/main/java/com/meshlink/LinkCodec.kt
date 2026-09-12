@@ -19,9 +19,14 @@ import java.util.concurrent.ConcurrentHashMap
 object LinkCodec {
     private const val TAG = "LinkCodec"
 
-    /** Two header bytes, each a single unsigned byte, so a message caps at 255 chunks. */
-    private const val HEADER_SIZE = 2
-    private const val MAX_CHUNKS = 255
+    /**
+     * Four header bytes: a big-endian chunk index and total, two bytes each.
+     *
+     * A one-byte index capped any message at 255 chunks, roughly 127 KB, which
+     * is far too small for a file transfer. Two bytes lifts that to 65535 chunks.
+     */
+    private const val HEADER_SIZE = 4
+    private const val MAX_CHUNKS = 65_535
 
     /** ATT overhead: an MTU of N carries N-3 bytes of notification/write payload. */
     private const val ATT_OVERHEAD = 3
@@ -69,8 +74,10 @@ object LinkCodec {
             val start = index * chunkSize
             val end = minOf(start + chunkSize, combined.size)
             val chunk = ByteArray(HEADER_SIZE + (end - start))
-            chunk[0] = index.toByte()
-            chunk[1] = total.toByte()
+            chunk[0] = (index shr 8).toByte()
+            chunk[1] = index.toByte()
+            chunk[2] = (total shr 8).toByte()
+            chunk[3] = total.toByte()
             System.arraycopy(combined, start, chunk, HEADER_SIZE, end - start)
             chunk
         }
@@ -100,8 +107,8 @@ object LinkCodec {
             }
             if (chunk.size < HEADER_SIZE) return null
 
-            val index = chunk[0].toInt() and 0xFF
-            val total = chunk[1].toInt() and 0xFF
+            val index = ((chunk[0].toInt() and 0xFF) shl 8) or (chunk[1].toInt() and 0xFF)
+            val total = ((chunk[2].toInt() and 0xFF) shl 8) or (chunk[3].toInt() and 0xFF)
             if (total == 0) return null
             val payload = chunk.copyOfRange(HEADER_SIZE, chunk.size)
 

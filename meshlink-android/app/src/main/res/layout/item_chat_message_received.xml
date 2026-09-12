@@ -40,6 +40,19 @@
             android:paddingTop="8dp"
             android:paddingBottom="8dp">
 
+            <!-- Shown only for images whose bytes have arrived; the label below
+                 then carries just the size, not a redundant caption. -->
+            <ImageView
+                android:id="@+id/ivMediaPreview"
+                android:layout_width="220dp"
+                android:layout_height="220dp"
+                android:layout_marginBottom="6dp"
+                android:adjustViewBounds="true"
+                android:background="#10FFFFFF"
+                android:contentDescription="Attachment preview"
+                android:scaleType="centerCrop"
+                android:visibility="gone" />
+
             <TextView
                 android:id="@+id/tvMessage"
                 android:layout_width="wrap_content"
