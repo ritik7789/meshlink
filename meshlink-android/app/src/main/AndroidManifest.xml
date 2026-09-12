@@ -22,7 +22,7 @@
         android:label="MeshLink"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
+        android:theme="@style/Theme.MeshLink">
         
         <activity
             android:name=".MainActivity"
@@ -34,6 +34,7 @@
         </activity>
         
         <activity android:name=".ChatActivity" />
+        <activity android:name=".GroupInfoActivity" />
         
         <!-- Foreground service for background relay (NFR-3.1.2) -->
         <service android:name=".RelayService" android:foregroundServiceType="connectedDevice|location" />

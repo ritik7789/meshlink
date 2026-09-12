@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shared shell for the starred-message and blocked-contact lists. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_attach_panel"
+    android:orientation="vertical"
+    android:paddingTop="22dp"
+    android:paddingBottom="10dp">
+
+    <TextView
+        android:id="@+id/tvListTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="22dp"
+        android:textColor="#E9EDEF"
+        android:textSize="19sp" />
+
+    <TextView
+        android:id="@+id/tvListSubtitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="22dp"
+        android:layout_marginTop="3dp"
+        android:layout_marginEnd="22dp"
+        android:textColor="#8696A0"
+        android:textSize="12sp" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvDialogList"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:maxHeight="430dp" />
+
+    <TextView
+        android:id="@+id/tvListEmpty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="30dp"
+        android:textAlignment="center"
+        android:textColor="#8696A0"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="end"
+        android:orientation="horizontal"
+        android:paddingEnd="12dp">
+
+        <TextView
+            android:id="@+id/btnListAction"
+            style="@style/DialogAction"
+            android:textColor="#F2685C"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/btnListClose"
+            style="@style/DialogAction"
+            android:text="CLOSE"
+            android:textColor="#00A884" />
+    </LinearLayout>
+</LinearLayout>

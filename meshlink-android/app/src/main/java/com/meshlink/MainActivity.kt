@@ -129,6 +129,7 @@ class MainActivity : AppCompatActivity() {
         rvConversations.adapter = conversationAdapter
 
         btnBroadcast.setOnClickListener { showNewChatDialog() }
+        UiMotion.attachPressFeedback(btnBroadcast, scale = 0.9f)
 
         // Both the banner and its action label re-open the enable prompt, so a
         // user who dismissed it once still has an obvious way back.
@@ -308,7 +309,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.Main) {
                 conversationAdapter.setGroupNames(groups)
                 conversationAdapter.setConversations(merged)
-                tvEmptyState.visibility = if (merged.isEmpty()) View.VISIBLE else View.GONE
+                UiMotion.fade(tvEmptyState, merged.isEmpty())
             }
             
             // Load unread counts
@@ -371,12 +372,19 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent(this, ChatActivity::class.java).apply {
             putExtra(ChatActivity.EXTRA_GROUP_ID, groupId)
         })
+        applyOpenTransition()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyOpenTransition() {
+        overridePendingTransition(R.anim.slide_in_right, R.anim.slide_out_left)
     }
 
     private fun openChat(peerId: Long) {
         startActivity(Intent(this, ChatActivity::class.java).apply {
             putExtra(ChatActivity.EXTRA_PEER_BEACON_ID, peerId)
         })
+        applyOpenTransition()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -384,67 +392,187 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
+    /**
+     * Shows our own menu anchored to the overflow button.
+     *
+     * The framework's menu ignores the activity palette and renders light and
+     * square-cornered, which looked pasted in from another app.
+     */
+    private fun showOverflowMenu() {
+        val anchor: View = findViewById(R.id.action_overflow)
+            ?: findViewById<View>(R.id.toolbar)
+        ThemedMenu.showAnchored(
+            this,
+            anchor,
+            listOf(
+                ThemedMenu.Item("Set username", R.drawable.ic_person) { showSetUsernameDialog() },
+                ThemedMenu.Item("Starred messages", R.drawable.ic_star_filled) { showStarredMessagesDialog() },
+                ThemedMenu.Item("Blocked contacts", R.drawable.ic_block) { showBlockedNodesDialog() }
+            )
+        )
+    }
+
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.action_set_username -> {
-                showSetUsernameDialog()
-                true
-            }
-            R.id.action_starred_messages -> {
-                showStarredMessagesDialog()
-                true
-            }
-            R.id.action_blocked_nodes -> {
-                showBlockedNodesDialog()
+            R.id.action_overflow -> {
+                showOverflowMenu()
                 true
             }
             else -> super.onOptionsItemSelected(item)
         }
     }
 
+    /** Wraps a custom view in a transparent, themed dialog shell. */
+    private fun themedDialog(view: View): AlertDialog =
+        AlertDialog.Builder(this).setView(view).create().apply {
+            window?.setBackgroundDrawable(
+                android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+            )
+        }
+
+    /**
+     * Your name is what every other node shows for you, so the dialog previews
+     * the avatar they will see and updates it as you type.
+     */
     private fun showSetUsernameDialog() {
-        val input = EditText(this)
+        val view = layoutInflater.inflate(R.layout.dialog_username, null)
+        val input = view.findViewById<EditText>(R.id.etUsername)
+        val avatar = view.findViewById<TextView>(R.id.tvAvatarPreview)
+        val idHint = view.findViewById<TextView>(R.id.tvNodeIdHint)
         val prefs = getSharedPreferences(RelayService.PREFS_NAME, MODE_PRIVATE)
-        input.setText(prefs.getString(RelayService.PREF_USERNAME, ""))
-        input.hint = "Enter your username"
-        
-        AlertDialog.Builder(this)
-            .setTitle("Set Username")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val text = input.text.toString().trim()
-                if (text.isNotBlank()) {
-                    prefs.edit().putString(RelayService.PREF_USERNAME, text).apply()
-                    // The name travels in presence gossip, so re-announcing
-                    // pushes it to the whole mesh rather than only to neighbours.
-                    val intent = Intent(this, RelayService::class.java).apply {
-                        action = RelayService.ACTION_ANNOUNCE_PRESENCE
-                    }
-                    startService(intent)
-                    Toast.makeText(this, "Username updated", Toast.LENGTH_SHORT).show()
-                }
+
+        val current = prefs.getString(RelayService.PREF_USERNAME, "").orEmpty()
+        input.setText(current)
+        input.setSelection(input.text.length)
+        idHint.text = "Node ${beaconIdToRow(localBeaconId)}"
+
+        fun paintPreview(name: String) {
+            avatar.text = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        }
+        paintPreview(current)
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) = paintPreview(s?.toString().orEmpty())
+            override fun beforeTextChanged(t: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(t: CharSequence?, a: Int, b: Int, c: Int) = Unit
+        })
+
+        val dialog = themedDialog(view)
+        view.findViewById<TextView>(R.id.btnUsernameCancel).setOnClickListener { dialog.dismiss() }
+        view.findViewById<TextView>(R.id.btnUsernameSave).setOnClickListener {
+            val text = input.text.toString().trim()
+            if (text.isBlank()) {
+                Toast.makeText(this, "Pick a name first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            prefs.edit().putString(RelayService.PREF_USERNAME, text).apply()
+            // The name travels in presence gossip, so re-announcing pushes it to
+            // the whole mesh rather than only to current neighbours.
+            startService(Intent(this, RelayService::class.java).apply {
+                action = RelayService.ACTION_ANNOUNCE_PRESENCE
+            })
+            Toast.makeText(this, "Name updated", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
+        dialog.show()
     }
 
+    /**
+     * Starred messages, each a route back to where it was said.
+     *
+     * Tapping one opens that conversation scrolled to the message: a saved
+     * message is only worth keeping if you can find its context again.
+     */
     private fun showStarredMessagesDialog() {
+        val view = layoutInflater.inflate(R.layout.dialog_list, null)
+        val list = view.findViewById<RecyclerView>(R.id.rvDialogList)
+        val empty = view.findViewById<TextView>(R.id.tvListEmpty)
+        view.findViewById<TextView>(R.id.tvListTitle).text = "Starred messages"
+        view.findViewById<TextView>(R.id.tvListSubtitle).text =
+            "Tap to open the conversation it came from"
+        empty.text = "Nothing starred yet.\nLong-press a message and tap the star."
+
+        val dialog = themedDialog(view)
+        val adapter = StarredAdapter(
+            nameFor = { row -> peerDisplayName(row) },
+            onOpen = { message ->
+                dialog.dismiss()
+                openChatAtMessage(message)
+            },
+            onUnstar = { message ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    db.messageDao().updateStarStatus(message.messageId, false)
+                }
+                (list.adapter as StarredAdapter).remove(message)
+                if ((list.adapter as StarredAdapter).isEmpty()) UiMotion.fade(empty, true)
+                loadConversations()
+            }
+        )
+        list.layoutManager = LinearLayoutManager(this)
+        list.adapter = adapter
+
         CoroutineScope(Dispatchers.IO).launch {
             val starred = db.messageDao().getStarredMessages()
             withContext(Dispatchers.Main) {
-                if (starred.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "No starred messages", Toast.LENGTH_SHORT).show()
-                    return@withContext
-                }
-                
-                val texts = starred.map { it.plaintext }.toTypedArray()
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Starred Messages")
-                    .setItems(texts) { _, _ -> }
-                    .setPositiveButton("Close", null)
-                    .show()
+                adapter.submit(starred)
+                empty.visibility = if (starred.isEmpty()) View.VISIBLE else View.GONE
             }
         }
+
+        view.findViewById<TextView>(R.id.btnListClose).setOnClickListener { dialog.dismiss() }
+        dialog.show()
+    }
+
+    /** Opens the conversation a starred message belongs to, focused on it. */
+    private fun openChatAtMessage(message: com.meshlink.db.MessageEntity) {
+        val intent = Intent(this, ChatActivity::class.java).apply {
+            if (message.groupId != null) {
+                putExtra(ChatActivity.EXTRA_GROUP_ID, message.groupId)
+            } else {
+                val peer = if (message.direction == "OUTBOUND") message.recipientId else message.senderId
+                putExtra(ChatActivity.EXTRA_PEER_BEACON_ID, peer)
+            }
+            putExtra(ChatActivity.EXTRA_FOCUS_MESSAGE_ID, message.messageId)
+        }
+        startActivity(intent)
+        applyOpenTransition()
+    }
+
+    /** Blocked contacts, with the action that undoes each one on its own row. */
+    private fun showBlockedNodesDialog() {
+        val view = layoutInflater.inflate(R.layout.dialog_list, null)
+        val list = view.findViewById<RecyclerView>(R.id.rvDialogList)
+        val empty = view.findViewById<TextView>(R.id.tvListEmpty)
+        view.findViewById<TextView>(R.id.tvListTitle).text = "Blocked contacts"
+        view.findViewById<TextView>(R.id.tvListSubtitle).text =
+            "Their messages are discarded, but your device still relays for them"
+        empty.text = "No blocked contacts."
+
+        val dialog = themedDialog(view)
+        val adapter = BlockedAdapter { node ->
+            CoroutineScope(Dispatchers.IO).launch {
+                db.blockedNodeDao().unblock(node.beaconRow)
+                notifyBlockListChanged()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Unblocked", Toast.LENGTH_SHORT).show()
+                    loadConversations()
+                }
+            }
+            (list.adapter as BlockedAdapter).remove(node)
+            if ((list.adapter as BlockedAdapter).isEmpty()) UiMotion.fade(empty, true)
+        }
+        list.layoutManager = LinearLayoutManager(this)
+        list.adapter = adapter
+
+        CoroutineScope(Dispatchers.IO).launch {
+            val blocked = db.blockedNodeDao().all()
+            withContext(Dispatchers.Main) {
+                adapter.submit(blocked)
+                empty.visibility = if (blocked.isEmpty()) View.VISIBLE else View.GONE
+            }
+        }
+
+        view.findViewById<TextView>(R.id.btnListClose).setOnClickListener { dialog.dismiss() }
+        dialog.show()
     }
 
     /**
@@ -596,15 +724,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val name = peerDisplayName(peerId)
-        AlertDialog.Builder(this)
-            .setTitle(name)
-            .setItems(arrayOf("Delete conversation", "Block $name")) { _, which ->
-                when (which) {
-                    0 -> showDeleteConversationDialog(peerId)
-                    1 -> showBlockDialog(peerId, name)
+        ThemedMenu.showCentred(
+            this,
+            name,
+            listOf(
+                ThemedMenu.Item("Delete conversation", R.drawable.ic_delete, "#F2685C") {
+                    showDeleteConversationDialog(peerId)
+                },
+                ThemedMenu.Item("Block $name", R.drawable.ic_block) {
+                    showBlockDialog(peerId, name)
                 }
-            }
-            .show()
+            )
+        )
     }
 
     private fun peerDisplayName(peerId: Long): String =
@@ -629,47 +760,6 @@ class MainActivity : AppCompatActivity() {
                     notifyBlockListChanged()
                     withContext(Dispatchers.Main) {
                         Toast.makeText(this@MainActivity, "$name blocked", Toast.LENGTH_SHORT).show()
-                        loadConversations()
-                    }
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    /** Lists blocked nodes and lets the user lift a block. */
-    private fun showBlockedNodesDialog() {
-        CoroutineScope(Dispatchers.IO).launch {
-            val blocked = db.blockedNodeDao().all()
-            withContext(Dispatchers.Main) {
-                if (blocked.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "No blocked nodes", Toast.LENGTH_SHORT).show()
-                    return@withContext
-                }
-                val labels = blocked.map {
-                    it.name?.takeIf { n -> n.isNotBlank() }
-                        ?: defaultNodeName(rowToBeaconId(it.beaconRow))
-                }.toTypedArray()
-
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Blocked Nodes")
-                    .setItems(labels) { _, which -> confirmUnblock(blocked[which], labels[which]) }
-                    .setPositiveButton("Close", null)
-                    .show()
-            }
-        }
-    }
-
-    private fun confirmUnblock(node: com.meshlink.db.BlockedNodeEntity, label: String) {
-        AlertDialog.Builder(this)
-            .setTitle("Unblock $label?")
-            .setMessage("You will start receiving messages from $label again.")
-            .setPositiveButton("Unblock") { _, _ ->
-                CoroutineScope(Dispatchers.IO).launch {
-                    db.blockedNodeDao().unblock(node.beaconRow)
-                    notifyBlockListChanged()
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(this@MainActivity, "$label unblocked", Toast.LENGTH_SHORT).show()
                         loadConversations()
                     }
                 }

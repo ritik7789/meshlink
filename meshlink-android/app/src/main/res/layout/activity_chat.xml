@@ -8,6 +8,7 @@
 
     <!-- Top Bar -->
     <LinearLayout
+        android:id="@+id/chatHeader"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
         android:background="#1F2C34"
@@ -21,6 +22,17 @@
             android:layout_height="48dp"
             android:background="?android:attr/selectableItemBackgroundBorderless"
             android:src="@drawable/ic_back" />
+
+        <TextView
+            android:id="@+id/tvHeaderAvatar"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:layout_marginEnd="12dp"
+            android:background="@drawable/bg_avatar"
+            android:gravity="center"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold" />
 
         <LinearLayout
             android:layout_width="0dp"
@@ -60,14 +72,36 @@
         </LinearLayout>
     </LinearLayout>
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/rvChat"
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:clipToPadding="false"
-        android:paddingBottom="8dp"
-        android:paddingTop="8dp" />
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvChat"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="8dp"
+            android:paddingTop="8dp" />
+
+        <!-- Appears only when the user has scrolled away from the newest
+             message, so it never covers content they are actually reading. -->
+        <TextView
+            android:id="@+id/btnJumpLatest"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/bg_jump_latest"
+            android:elevation="6dp"
+            android:gravity="center"
+            android:text="↓"
+            android:textColor="#E9EDEF"
+            android:textSize="18sp"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <!-- Bottom Input Bar -->
     <LinearLayout
@@ -95,7 +129,7 @@
             android:layout_weight="1"
             android:background="@drawable/bg_input_field"
             android:hint="Message"
-            android:inputType="textMultiLine"
+            android:inputType="textCapSentences|textMultiLine"
             android:maxLines="5"
             android:minHeight="48dp"
             android:textColor="#FFFFFF"

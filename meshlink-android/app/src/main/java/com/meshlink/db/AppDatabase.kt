@@ -8,7 +8,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [MessageEntity::class, CustodyEntity::class, BlockedNodeEntity::class, EmergencyUsageEntity::class, GroupEntity::class, GroupMemberEntity::class], version = 9, exportSchema = false)
+@Database(entities = [MessageEntity::class, CustodyEntity::class, BlockedNodeEntity::class, EmergencyUsageEntity::class, GroupEntity::class, GroupMemberEntity::class], version = 10, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun custodyDao(): CustodyDao
@@ -130,6 +130,23 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Purges control payloads that were stored as chat messages.
+         *
+         * Before payload types were whitelisted, a group invite decoded under an
+         * older enum ordering fell through to the text path and was saved - and
+         * rendered - verbatim, group key included. Deleting those rows removes
+         * the key material from disk rather than merely hiding it.
+         */
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "DELETE FROM messages WHERE plaintext LIKE '{\"gid\":%' " +
+                        "OR plaintext LIKE '%\"key\":\"%' OR plaintext LIKE '{\"k\":\"%'"
+                )
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -137,7 +154,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "meshlink_database"
                 )
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

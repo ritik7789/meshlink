@@ -123,6 +123,27 @@ interface MessageDao {
     """)
     suspend fun deleteConversation(peerId: Long)
 
+    /**
+     * Clears a group's history on this device only.
+     *
+     * Local by design: other members keep their copies. Removing a message for
+     * everyone is a different action with different authority, handled by the
+     * deletion tombstone.
+     */
+    @Query("DELETE FROM messages WHERE groupId = :groupId")
+    suspend fun clearGroupHistory(groupId: String)
+
+    /** Images from a group whose bytes have arrived, newest first. */
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE groupId = :groupId AND messageType = 'IMAGE'
+        AND mediaState = 'READY' AND isDeleted = 0
+        ORDER BY timestamp DESC LIMIT :limit
+        """
+    )
+    suspend fun getGroupMedia(groupId: String, limit: Int = 12): List<MessageEntity>
+
     @Query("DELETE FROM messages")
     suspend fun deleteAllMessages()
 

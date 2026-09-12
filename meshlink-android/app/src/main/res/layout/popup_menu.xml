@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Themed replacement for the framework overflow menu, which rendered as a white
+  square-cornered sheet on a dark app. Shares the panel styling used by the
+  attachment menu so every menu in the app reads as the same surface.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/menuPanel"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_attach_panel"
+    android:elevation="12dp"
+    android:minWidth="230dp"
+    android:orientation="vertical"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp" />

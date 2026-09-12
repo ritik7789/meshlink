@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-page group info rather than a dialog: identity at the top, then what the
+  group has shared, then who is in it, and finally the actions that change your
+  relationship to it. Ordered from "what is this" down to "what can I do",
+  which is the order someone actually reads it in.
+-->
+<androidx.core.widget.NestedScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0B141A"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingBottom="28dp">
+
+        <!-- Identity -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#1F2C34"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:paddingBottom="26dp">
+
+            <ImageButton
+                android:id="@+id/btnInfoBack"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_gravity="start"
+                android:layout_marginStart="6dp"
+                android:layout_marginTop="6dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Back"
+                android:src="@drawable/ic_back" />
+
+            <TextView
+                android:id="@+id/tvInfoAvatar"
+                android:layout_width="104dp"
+                android:layout_height="104dp"
+                android:background="@drawable/bg_avatar"
+                android:backgroundTint="#00A884"
+                android:gravity="center"
+                android:textColor="#FFFFFF"
+                android:textSize="42sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvInfoName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="24dp"
+                android:layout_marginTop="14dp"
+                android:layout_marginEnd="24dp"
+                android:textAlignment="center"
+                android:textColor="#FFFFFF"
+                android:textSize="23sp" />
+
+            <TextView
+                android:id="@+id/tvInfoSubtitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="5dp"
+                android:textColor="#8696A0"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <!-- Shared media -->
+        <TextView
+            android:id="@+id/tvMediaHeader"
+            style="@style/InfoSectionHeader"
+            android:text="Shared media" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvInfoMedia"
+            android:layout_width="match_parent"
+            android:layout_height="96dp"
+            android:clipToPadding="false"
+            android:orientation="horizontal"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp" />
+
+        <TextView
+            android:id="@+id/tvNoMedia"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="22dp"
+            android:paddingEnd="22dp"
+            android:paddingBottom="10dp"
+            android:text="Nothing shared yet."
+            android:textColor="#8696A0"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <!-- Members -->
+        <TextView
+            android:id="@+id/tvMembersHeader"
+            style="@style/InfoSectionHeader" />
+
+        <LinearLayout
+            android:id="@+id/rowAddMember"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="22dp"
+            android:paddingEnd="22dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="42dp"
+                android:layout_height="42dp"
+                android:background="@drawable/bg_avatar"
+                android:backgroundTint="#2A3942"
+                android:contentDescription="@null"
+                android:padding="10dp"
+                android:src="@drawable/ic_person_add"
+                android:tint="#00A884" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="14dp"
+                android:text="Add members"
+                android:textColor="#00A884"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvInfoMembers"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:nestedScrollingEnabled="false" />
+
+        <!-- Actions -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:background="#1C2A31" />
+
+        <TextView
+            android:id="@+id/btnClearChat"
+            style="@style/InfoAction"
+            android:drawableStart="@drawable/ic_delete"
+            android:text="Clear chat on this device" />
+
+        <TextView
+            android:id="@+id/btnLeaveGroup"
+            style="@style/InfoAction"
+            android:drawableStart="@drawable/ic_leave"
+            android:text="Leave group"
+            android:textColor="#F2685C" />
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

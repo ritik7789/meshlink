@@ -131,6 +131,14 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
         private const val PRESENCE_VERSION = 1
 
+        /** The only payload types that may be stored and shown as a message. */
+        private val CONVERSATIONAL_PAYLOAD_TYPES = setOf(
+            uniffi.meshlink_core.PayloadType.TEXT,
+            uniffi.meshlink_core.PayloadType.CONTACT_CARD,
+            uniffi.meshlink_core.PayloadType.STICKER_REF,
+            uniffi.meshlink_core.PayloadType.SOS
+        )
+
         /** Payload types belonging to the media handshake rather than conversation. */
         private val MEDIA_PAYLOAD_TYPES = setOf(
             uniffi.meshlink_core.PayloadType.MEDIA_OFFER,
@@ -2024,6 +2032,16 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         if (envelope.payloadType in MEDIA_PAYLOAD_TYPES) {
             val senderId = envelope.senderId.toInt()
             if (!isBlocked(senderId)) handleMediaPayload(envelope, senderId)
+            return
+        }
+
+        // Only conversational payloads may become a chat message. Everything
+        // else is protocol traffic, and rendering one as text is how a group
+        // invite - key and all - once appeared in a conversation after an enum
+        // change shifted its type. A payload this build does not recognise is
+        // dropped rather than guessed at.
+        if (envelope.payloadType !in CONVERSATIONAL_PAYLOAD_TYPES) {
+            Log.w(TAG, "Ignoring non-conversational payload ${envelope.payloadType}")
             return
         }
 

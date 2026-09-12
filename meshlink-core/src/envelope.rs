@@ -37,6 +37,12 @@ pub enum PayloadType {
     /// Reference to a sticker in a pack shipped inside the app, so sending one
     /// costs a few bytes rather than an image transfer.
     StickerRef,
+    Sos,
+    /// Node announcing itself to the whole mesh: carries its identity key, its
+    /// static X25519 key and its display name. Flooded like a broadcast, which
+    /// is what makes nodes visible to each other beyond one hop.
+    Presence,
+    TopologyHint,
     /// Hands one member the group's shared key and current roster, sealed to
     /// that member alone. Unicast, and re-sent to everyone still in the group
     /// whenever the key is rotated.
@@ -45,15 +51,14 @@ pub enum PayloadType {
     ///
     /// Flooded once and encrypted with the group key, so one message costs the
     /// same airtime whether the group has three members or twenty-five, and
-    /// nodes outside the group simply cannot open it.
+    /// nodes outside the group cannot open any of it.
     GroupMessage,
-    Sos,
-    /// Node announcing itself to the whole mesh: carries its identity key, its
-    /// static X25519 key and its display name. Flooded like a broadcast, which
-    /// is what makes nodes visible to each other beyond one hop.
-    Presence,
-    TopologyHint,
 }
+
+// NOTE: new variants must be appended here, never inserted. The encoding is
+// positional, so inserting one shifts every later discriminant and an older node
+// silently reads a message as a *different* type rather than rejecting it -
+// which is how a group invite once rendered as a chat message, key and all.
 
 impl PayloadType {
     /// Whether this kind of payload carries bulk data that must not be flooded.

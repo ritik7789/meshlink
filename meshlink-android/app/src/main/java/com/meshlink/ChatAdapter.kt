@@ -18,11 +18,23 @@ class ChatAdapter(
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     private val messages = mutableListOf<MessageEntity>()
+
+    /** Highest row already animated, so scrolling back does not re-animate. */
+    private var lastAnimatedPosition = -1
+
+    /** Briefly tinted after jumping here, so the eye finds it. */
+    private var highlightedId: String? = null
     private val dateFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     companion object {
         private const val TYPE_SENT = 1
         private const val TYPE_RECEIVED = 2
+    }
+
+    /** Marks a message to stand out until the next list update. */
+    fun highlight(messageId: String?) {
+        highlightedId = messageId
+        notifyDataSetChanged()
     }
 
     fun setMessages(newMessages: List<MessageEntity>) {
@@ -46,6 +58,15 @@ class ChatAdapter(
         }
     }
 
+    private fun animateIfNew(holder: RecyclerView.ViewHolder, position: Int) {
+        if (position <= lastAnimatedPosition) return
+        lastAnimatedPosition = position
+        UiMotion.animateIncoming(
+            holder.itemView,
+            fromEnd = messages.getOrNull(position)?.direction == "OUTBOUND"
+        )
+    }
+
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val message = messages[position]
         if (holder is SentMessageViewHolder) {
@@ -53,6 +74,7 @@ class ChatAdapter(
         } else if (holder is ReceivedMessageViewHolder) {
             holder.bind(message)
         }
+        animateIfNew(holder, position)
     }
 
     override fun getItemCount(): Int = messages.size
@@ -123,7 +145,8 @@ class ChatAdapter(
                 }
             }
             itemView.setOnLongClickListener {
-                onMessageLongClick(messages[adapterPosition])
+                UiMotion.longPressTick(itemView)
+                messages.getOrNull(adapterPosition)?.let(onMessageLongClick)
                 true
             }
         }
@@ -140,8 +163,15 @@ class ChatAdapter(
             }
             if (message.isStarred) tvStatus.text = "★ " + tvStatus.text
             
-            itemView.setBackgroundColor(if (selectedMessageIds.contains(message.messageId)) 
-                android.graphics.Color.parseColor("#3300A884") else android.graphics.Color.TRANSPARENT)
+            itemView.setBackgroundColor(
+                when {
+                    selectedMessageIds.contains(message.messageId) ->
+                        android.graphics.Color.parseColor("#3300A884")
+                    highlightedId == message.messageId ->
+                        android.graphics.Color.parseColor("#33F2A33C")
+                    else -> android.graphics.Color.TRANSPARENT
+                }
+            )
 
             // Date Header Logic
             if (adapterPosition == 0 || !isSameDay(message.timestamp, messages[adapterPosition - 1].timestamp)) {
@@ -168,7 +198,8 @@ class ChatAdapter(
                 }
             }
             itemView.setOnLongClickListener {
-                onMessageLongClick(messages[adapterPosition])
+                UiMotion.longPressTick(itemView)
+                messages.getOrNull(adapterPosition)?.let(onMessageLongClick)
                 true
             }
         }
@@ -178,8 +209,15 @@ class ChatAdapter(
             tvTimestamp.text = dateFormat.format(Date(message.timestamp))
             if (message.isStarred) tvTimestamp.text = "★ " + tvTimestamp.text
             
-            itemView.setBackgroundColor(if (selectedMessageIds.contains(message.messageId)) 
-                android.graphics.Color.parseColor("#3300A884") else android.graphics.Color.TRANSPARENT)
+            itemView.setBackgroundColor(
+                when {
+                    selectedMessageIds.contains(message.messageId) ->
+                        android.graphics.Color.parseColor("#3300A884")
+                    highlightedId == message.messageId ->
+                        android.graphics.Color.parseColor("#33F2A33C")
+                    else -> android.graphics.Color.TRANSPARENT
+                }
+            )
 
             // Date Header Logic
             if (adapterPosition == 0 || !isSameDay(message.timestamp, messages[adapterPosition - 1].timestamp)) {

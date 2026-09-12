@@ -42,6 +42,9 @@ class ChatActivity : AppCompatActivity() {
         /** Present when this screen is showing a group rather than one peer. */
         const val EXTRA_GROUP_ID = "group_id"
 
+        /** Scroll to and briefly highlight this message on open. */
+        const val EXTRA_FOCUS_MESSAGE_ID = "focus_message_id"
+
         /** Emitted after messages are marked seen, so the list can drop the badge. */
         const val ACTION_CONVERSATION_READ = "com.meshlink.ACTION_CONVERSATION_READ"
     }
@@ -54,6 +57,9 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var vOnlineStatus: View
     private lateinit var btnBack: ImageButton
     private lateinit var btnAttach: ImageButton
+    private lateinit var jumpLatest: TextView
+    private lateinit var chatHeader: View
+    private lateinit var headerAvatar: TextView
 
     /**
      * Contact picking uses ACTION_PICK on the phone-number table rather than
@@ -73,11 +79,17 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var chatAdapter: ChatAdapter
     private var peerBeaconId: Long = 0
     private var groupId: String? = null
+
+    /** Message to jump to once loaded, from a starred-message tap. */
+    private var focusMessageId: String? = null
     private var isGroupAdmin: Boolean = false
     private var localBeaconId: Int = 0
 
     /** Distance to this peer; 1 means a direct link, 0 means unreachable. */
     private var peerHops: Int = 0
+
+    /** Every reachable node and its distance, used by the group member list. */
+    private val reachableNodes = mutableMapOf<Long, Int>()
 
     private val db by lazy { AppDatabase.getDatabase(this) }
 
@@ -110,9 +122,20 @@ class ChatActivity : AppCompatActivity() {
 
     private val actionModeCallback = object : android.view.ActionMode.Callback {
         override fun onCreateActionMode(mode: android.view.ActionMode?, menu: android.view.Menu?): Boolean {
-            menu?.add(0, 1, 0, "Delete")?.setIcon(android.R.drawable.ic_menu_delete)?.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
-            menu?.add(0, 2, 0, "Copy")?.setIcon(android.R.drawable.ic_menu_set_as)?.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
-            menu?.add(0, 3, 0, "Star")?.setIcon(android.R.drawable.btn_star)?.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+            // The selection bar floats above this screen's own header, so two
+            // headers would stack. Hiding ours lets it read as a replacement,
+            // which is what every other messaging app does.
+            UiMotion.fade(chatHeader, false)
+            // The framework icons used here were Android 1.x era: grey, untinted
+            // and mismatched in weight against everything else on the screen.
+            fun add(id: Int, title: String, icon: Int) {
+                menu?.add(0, id, 0, title)
+                    ?.setIcon(icon)
+                    ?.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+            }
+            add(1, "Delete", R.drawable.ic_delete)
+            add(2, "Copy", R.drawable.ic_copy)
+            add(3, "Star", R.drawable.ic_star_outline)
             return true
         }
 
@@ -165,6 +188,8 @@ class ChatActivity : AppCompatActivity() {
         override fun onDestroyActionMode(mode: android.view.ActionMode?) {
             chatAdapter.clearSelection()
             actionMode = null
+            // Bring the conversation header back now the selection bar is gone.
+            UiMotion.fade(chatHeader, true)
         }
     }
 
@@ -174,6 +199,7 @@ class ChatActivity : AppCompatActivity() {
 
         peerBeaconId = intent.getLongExtra(EXTRA_PEER_BEACON_ID, 0)
         groupId = intent.getStringExtra(EXTRA_GROUP_ID)
+        focusMessageId = intent.getStringExtra(EXTRA_FOCUS_MESSAGE_ID)
 
         rvChat = findViewById(R.id.rvChat)
         etMessage = findViewById(R.id.etMessage)
@@ -183,15 +209,21 @@ class ChatActivity : AppCompatActivity() {
         vOnlineStatus = findViewById(R.id.vOnlineStatus)
         btnBack = findViewById(R.id.btnBack)
         btnAttach = findViewById(R.id.btnAttach)
+        jumpLatest = findViewById(R.id.btnJumpLatest)
+        chatHeader = findViewById(R.id.chatHeader)
+        headerAvatar = findViewById(R.id.tvHeaderAvatar)
 
         val prefs = getSharedPreferences(RelayService.PREFS_NAME, MODE_PRIVATE)
         if (groupId != null) {
             refreshGroupHeader()
-            tvPeerName.setOnClickListener { showGroupSheet() }
-            tvBeaconId.setOnClickListener { showGroupSheet() }
+            tvPeerName.setOnClickListener { openGroupInfo() }
+            tvBeaconId.setOnClickListener { openGroupInfo() }
+            headerAvatar.setOnClickListener { openGroupInfo() }
         } else {
-            tvPeerName.text = prefs.getString(peerNameKeyForRow(peerBeaconId), null)?.takeIf { it.isNotBlank() }
+            val label = prefs.getString(peerNameKeyForRow(peerBeaconId), null)?.takeIf { it.isNotBlank() }
                 ?: defaultNodeName(rowToBeaconId(peerBeaconId))
+            tvPeerName.text = label
+            paintHeaderAvatar(label, peerBeaconId)
             tvBeaconId.text = "Beacon: $peerBeaconId"
         }
 
@@ -222,8 +254,27 @@ class ChatActivity : AppCompatActivity() {
         rvChat.adapter = chatAdapter
 
         btnBack.setOnClickListener { finish() }
+        // Sliding back out mirrors the way the screen arrived, so the stack has
+        // a direction rather than screens simply replacing one another.
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                finish()
+            }
+        })
         btnSend.setOnClickListener { sendMessage() }
         btnAttach.setOnClickListener { showAttachmentOptions() }
+
+        UiMotion.attachPressFeedback(btnSend)
+        UiMotion.attachPressFeedback(btnAttach)
+        UiMotion.attachPressFeedback(btnBack)
+
+        jumpLatest.setOnClickListener { scrollToLatest(smooth = true) }
+        // The jump button is only useful once the newest message is off screen.
+        rvChat.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recycler: RecyclerView, dx: Int, dy: Int) {
+                UiMotion.fade(jumpLatest, recycler.canScrollVertically(1))
+            }
+        })
 
         loadMessages()
     }
@@ -254,6 +305,12 @@ class ChatActivity : AppCompatActivity() {
         unregisterReceiver(chatReceiver)
     }
 
+    @Suppress("DEPRECATION")
+    override fun finish() {
+        super.finish()
+        overridePendingTransition(R.anim.slide_in_left, R.anim.slide_out_right)
+    }
+
     private fun loadMessages() {
         CoroutineScope(Dispatchers.IO).launch {
             val group = groupId
@@ -264,8 +321,18 @@ class ChatActivity : AppCompatActivity() {
             }
             withContext(Dispatchers.Main) {
                 chatAdapter.setMessages(messages)
-                if (messages.isNotEmpty()) {
-                    rvChat.scrollToPosition(messages.size - 1)
+                // A requested message wins over the usual jump to the newest, so
+                // arriving from a starred entry lands on what was tapped.
+                val target = focusMessageId?.let { id ->
+                    messages.indexOfFirst { it.messageId == id }.takeIf { it >= 0 }
+                }
+                when {
+                    target != null -> {
+                        rvChat.scrollToPosition(target)
+                        chatAdapter.highlight(focusMessageId)
+                        focusMessageId = null
+                    }
+                    messages.isNotEmpty() -> rvChat.scrollToPosition(messages.size - 1)
                 }
             }
             if (groupId == null) markConversationSeen() else refreshGroupHeader()
@@ -306,6 +373,7 @@ class ChatActivity : AppCompatActivity() {
         // copy here produced a duplicate that never matched the sent envelope.
         sendBody(text, MessageType.TEXT)
         etMessage.text.clear()
+        UiMotion.sendPulse(btnSend)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -477,7 +545,7 @@ class ChatActivity : AppCompatActivity() {
             }
 
             withContext(Dispatchers.Main) {
-                offerMedia(mediaId, file.length())
+                offerMedia(mediaId)
             }
         }
     }
@@ -490,7 +558,7 @@ class ChatActivity : AppCompatActivity() {
      * the recipient is several hops away that the bytes would have to cross other
      * people's devices, and that is what the allowance rations.
      */
-    private fun offerMedia(mediaId: String, size: Long) {
+    private fun offerMedia(mediaId: String) {
         if (peerHops == 1) {
             dispatchOffer(mediaId, emergency = false)
             return
@@ -584,7 +652,11 @@ class ChatActivity : AppCompatActivity() {
             val admin = db.groupDao().isAdmin(group, beaconIdToRow(localBeaconId))
             withContext(Dispatchers.Main) {
                 isGroupAdmin = admin
-                tvPeerName.text = info?.name ?: "Group"
+                val groupName = info?.name ?: "Group"
+                tvPeerName.text = groupName
+                // Use the group's own initial: an emoji here rendered as "?"
+                // because firstOrNull() takes half of a surrogate pair.
+                paintHeaderAvatar(groupName, group.hashCode().toLong() and 0xFF)
                 tvBeaconId.text = when {
                     info?.isActive == false -> "You are no longer a member"
                     else -> "${members.size} members · tap for info"
@@ -594,85 +666,35 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
-    private fun showGroupSheet() {
+    @Suppress("DEPRECATION")
+    private fun openGroupInfo() {
         val group = groupId ?: return
-        CoroutineScope(Dispatchers.IO).launch {
-            val members = db.groupDao().members(group)
-            val info = db.groupDao().group(group)
-            withContext(Dispatchers.Main) {
-                val labels = members.map { member ->
-                    val name = member.name ?: defaultNodeName(rowToBeaconId(member.beaconRow))
-                    if (member.isAdmin) "$name  ·  admin" else name
-                }.toTypedArray()
-
-                AlertDialog.Builder(this@ChatActivity)
-                    .setTitle(info?.name ?: "Group")
-                    .setItems(labels) { _, which ->
-                        if (isGroupAdmin) showMemberActions(group, members, which)
-                    }
-                    .setNegativeButton("Leave group") { _, _ -> confirmLeaveGroup(group) }
-                    .setPositiveButton("Close", null)
-                    .show()
-            }
-        }
+        startActivity(Intent(this, GroupInfoActivity::class.java).apply {
+            putExtra(GroupInfoActivity.EXTRA_GROUP_ID, group)
+        })
+        overridePendingTransition(R.anim.slide_in_right, R.anim.slide_out_left)
     }
 
-    private fun showMemberActions(
-        group: String,
-        members: List<com.meshlink.db.GroupMemberEntity>,
-        index: Int
-    ) {
-        val member = members[index]
-        if (member.beaconRow == beaconIdToRow(localBeaconId)) return
-        val name = member.name ?: defaultNodeName(rowToBeaconId(member.beaconRow))
-        val promote = if (member.isAdmin) "Remove admin rights" else "Make admin"
-
-        AlertDialog.Builder(this)
-            .setTitle(name)
-            .setItems(arrayOf(promote, "Remove from group")) { _, which ->
-                val remaining = if (which == 1) members.filter { it != member } else members
-                val admins = remaining.filter {
-                    if (it == member && which == 0) !member.isAdmin else it.isAdmin
-                }.map { it.beaconRow }.toMutableSet()
-                if (which == 0 && !member.isAdmin) admins += member.beaconRow
-
-                startService(Intent(this, RelayService::class.java).apply {
-                    action = RelayService.ACTION_UPDATE_GROUP_ROSTER
-                    putExtra(RelayService.EXTRA_GROUP_ID, group)
-                    putExtra(RelayService.EXTRA_GROUP_MEMBERS, remaining.map { it.beaconRow }.toLongArray())
-                    putExtra(RelayService.EXTRA_GROUP_ADMINS, admins.toLongArray())
-                })
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun confirmLeaveGroup(group: String) {
-        AlertDialog.Builder(this)
-            .setTitle("Leave group?")
-            .setMessage("You will stop receiving its messages. The conversation stays on this device.")
-            .setPositiveButton("Leave") { _, _ ->
-                startService(Intent(this, RelayService::class.java).apply {
-                    action = RelayService.ACTION_LEAVE_GROUP
-                    putExtra(RelayService.EXTRA_GROUP_ID, group)
-                })
-                finish()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
 
     /** Updates the header from the relay service's reachability snapshot. */
     private fun applyRoster(intent: Intent) {
+        val ids = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_IDS) ?: IntArray(0)
+        val hops = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_HOPS) ?: IntArray(0)
+        val names = intent.getStringArrayExtra(RelayService.EXTRA_ROSTER_NAMES) ?: emptyArray()
+
+        // Cached regardless of chat type: the group member list needs distances
+        // for people who are not the counterpart of this conversation.
+        reachableNodes.clear()
+        ids.forEachIndexed { index, beaconId ->
+            reachableNodes[beaconIdToRow(beaconId)] = hops.getOrElse(index) { 1 }
+        }
+
         // A group header shows membership, not one peer's reachability, so the
         // roster snapshot must not overwrite it.
         if (groupId != null) {
             refreshGroupHeader()
             return
         }
-        val ids = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_IDS) ?: IntArray(0)
-        val hops = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_HOPS) ?: IntArray(0)
-        val names = intent.getStringArrayExtra(RelayService.EXTRA_ROSTER_NAMES) ?: emptyArray()
 
         val index = ids.indexOfFirst { beaconIdToRow(it) == peerBeaconId }
         if (index < 0) {
@@ -706,6 +728,23 @@ class ChatActivity : AppCompatActivity() {
             .show()
     }
     
+    /** Colours the header avatar from the name, matching the list's palette. */
+    private fun paintHeaderAvatar(label: String, seed: Long) {
+        headerAvatar.text = label.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        val colours = arrayOf(
+            "#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB",
+            "#64B5F6", "#4FC3F7", "#4DD0E1", "#4DB6AC", "#81C784"
+        )
+        (headerAvatar.background as android.graphics.drawable.GradientDrawable)
+            .setColor(Color.parseColor(colours[(seed % colours.size).toInt()]))
+    }
+
+    private fun scrollToLatest(smooth: Boolean) {
+        val last = chatAdapter.itemCount - 1
+        if (last < 0) return
+        if (smooth) rvChat.smoothScrollToPosition(last) else rvChat.scrollToPosition(last)
+    }
+
     private fun updateOnlineStatus(isOnline: Boolean) {
         vOnlineStatus.backgroundTintList = android.content.res.ColorStateList.valueOf(
             Color.parseColor(if (isOnline) "#4DCA59" else "#8E9BA7")

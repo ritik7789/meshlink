@@ -1,16 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  A single entry that opens the app's own themed menu. The individual actions
+  live there rather than here, so they can carry icons and match the palette.
+-->
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
-        android:id="@+id/action_set_username"
-        android:title="Set Username"
-        app:showAsAction="never" />
-    <item
-        android:id="@+id/action_starred_messages"
-        android:title="Starred Messages"
-        app:showAsAction="never" />
-    <item
-        android:id="@+id/action_blocked_nodes"
-        android:title="Blocked Nodes"
-        app:showAsAction="never" />
+        android:id="@+id/action_overflow"
+        android:icon="@drawable/ic_overflow"
+        android:title="More"
+        app:showAsAction="always" />
 </menu>

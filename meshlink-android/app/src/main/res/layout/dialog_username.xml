@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Your name is what every other node in the mesh sees, so the dialog shows the
+  avatar they will see rather than presenting a bare text field.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_attach_panel"
+    android:gravity="center_horizontal"
+    android:orientation="vertical"
+    android:paddingStart="24dp"
+    android:paddingEnd="24dp"
+    android:paddingTop="26dp"
+    android:paddingBottom="16dp">
+
+    <TextView
+        android:id="@+id/tvAvatarPreview"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:background="@drawable/bg_avatar"
+        android:backgroundTint="#00A884"
+        android:gravity="center"
+        android:textColor="#FFFFFF"
+        android:textSize="30sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Your name on the mesh"
+        android:textColor="#E9EDEF"
+        android:textSize="17sp" />
+
+    <TextView
+        android:id="@+id/tvNodeIdHint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="#8696A0"
+        android:textSize="12sp" />
+
+    <EditText
+        android:id="@+id/etUsername"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="18dp"
+        android:background="@drawable/bg_input_field"
+        android:hint="Enter a name"
+        android:imeOptions="actionDone"
+        android:inputType="textPersonName|textCapWords"
+        android:maxLength="24"
+        android:maxLines="1"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:textColor="#E9EDEF"
+        android:textColorHint="#8696A0"
+        android:textSize="15sp" />
+
+    <TextView
+        android:id="@+id/tvUsernameHelp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Shared with nearby nodes so they see a name instead of an id."
+        android:textColor="#8696A0"
+        android:textSize="12sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:gravity="end"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/btnUsernameCancel"
+            style="@style/DialogAction"
+            android:text="CANCEL"
+            android:textColor="#8696A0" />
+
+        <TextView
+            android:id="@+id/btnUsernameSave"
+            style="@style/DialogAction"
+            android:text="SAVE"
+            android:textColor="#00A884" />
+    </LinearLayout>
+</LinearLayout>
