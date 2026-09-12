@@ -7,6 +7,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -24,7 +26,9 @@ import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.meshlink.db.AppDatabase
+import com.meshlink.db.CustodyEntity
 import com.meshlink.db.MessageEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +61,10 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             ParcelUuid(UUID.fromString("0000FE22-0000-1000-8000-00805F9B34FB"))
 
         const val ACTION_ROSTER_UPDATED = "com.meshlink.ACTION_ROSTER_UPDATED"
+
+        /** Tells the UI whether the radio the whole mesh depends on is usable. */
+        const val ACTION_BLUETOOTH_STATE = "com.meshlink.ACTION_BLUETOOTH_STATE"
+        const val EXTRA_BLUETOOTH_ENABLED = "extra_bluetooth_enabled"
         const val ACTION_MESSAGE_RECEIVED = "com.meshlink.ACTION_MESSAGE_RECEIVED"
 
         /** Emitted once an outbound message has been persisted, so the chat view
@@ -95,6 +103,23 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
         /** Bounds how much undecryptable traffic one sender can make us hold. */
         private const val MAX_DEFERRED_PER_SENDER = 20
+
+        /** How long an unacknowledged message keeps being retried before it is abandoned. */
+        private const val MAX_DELIVERY_AGE_MS = 24L * 60 * 60 * 1000
+
+        /** First retry gap; each further attempt doubles it up to [RETRY_MAX_GAP_MS]. */
+        private const val RETRY_BASE_GAP_MS = 20_000L
+        private const val RETRY_MAX_GAP_MS = 10L * 60 * 1000
+
+        /** Prefixes for the persisted per-node keys. */
+        private const val PREF_NODE_KEY_PREFIX = "node_xk_"
+        private const val PREF_NODE_IDENTITY_PREFIX = "node_ik_"
+
+        /** How many messages this node will carry for other people at once. */
+        private const val MAX_CUSTODY_ENTRIES = 100
+
+        /** How long a carried message is held before it is given up on. */
+        private const val CUSTODY_RETENTION_MS = 24L * 60 * 60 * 1000
         private const val DEDUP_MAX_AGE_SECS = 300u
     }
 
@@ -104,7 +129,11 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
     private val handler = Handler(Looper.getMainLooper())
     private var isScanning = false
+    private var isAdvertising = false
     private var scanCycleCount = 0
+
+    /** Whether discovery and the GATT server are currently up. */
+    private var meshRunning = false
 
     private lateinit var gattServer: GattServer
     private lateinit var gattClient: GattClient
@@ -112,7 +141,18 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     private lateinit var dedupCache: uniffi.meshlink_core.DedupCache
     private lateinit var staticKeys: uniffi.meshlink_core.StaticKeyPair
 
+    private lateinit var identityKey: uniffi.meshlink_core.IdentityKeyPair
     private var identityPublicKey: ByteArray = ByteArray(0)
+
+    /**
+     * Which neighbours have already been handed each undelivered message.
+     *
+     * When the recipient is unreachable the sender gives a copy to every node it
+     * meets, in the hope one of them is still around when the recipient returns.
+     * This stops that turning into re-handing the same message to the same
+     * neighbour on every tick.
+     */
+    private val offeredToCarriers = ConcurrentHashMap<String, MutableSet<Int>>()
 
     /**
      * Messages from a sender whose static key has not arrived yet, held until
@@ -123,8 +163,20 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     private val awaitingSenderKey =
         ConcurrentHashMap<Int, MutableList<uniffi.meshlink_core.MessageEnvelope>>()
 
-    /** Guards against overlapping flushes re-sending the same queued rows. */
-    private val flushInProgress = AtomicBoolean(false)
+    /** Guards against overlapping retries re-sending the same queued rows. */
+    private val retryInProgress = AtomicBoolean(false)
+
+    /**
+     * Per-message retry schedule, backing off as attempts accumulate.
+     *
+     * A recipient that never acknowledges — an out-of-date build, or a node that
+     * simply cannot answer — would otherwise be re-sent to on every twenty-second
+     * tick for a day. Backing off keeps a hopeless delivery from monopolising the
+     * radio while still retrying promptly when a peer has just reappeared.
+     * In-memory only: a restart retries soon, which is the safe direction to err.
+     */
+    private val nextRetryAt = ConcurrentHashMap<String, Long>()
+    private val retryAttempts = ConcurrentHashMap<String, Int>()
     private var lastPresenceAt = 0L
     private var presenceAnnouncePending = false
 
@@ -149,7 +201,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         peerManager = PeerManager()
         dedupCache = uniffi.meshlink_core.DedupCache()
 
-        val identityKey = KeyManager(this).getIdentityKey()
+        identityKey = KeyManager(this).getIdentityKey()
         identityPublicKey = identityKey.publicKey()
         localBeaconId = uniffi.meshlink_core.beaconIdFromPublicKey(identityPublicKey).toInt()
         staticKeys = uniffi.meshlink_core.StaticKeyPair.fromIdentitySeed(identityKey.toBytes())
@@ -161,7 +213,109 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         gattClient.localBeaconId = localBeaconId
         Log.i(TAG, "Local Beacon ID: $localBeaconId")
 
+        restoreKnownNodeKeys()
+
+        // The mesh is entirely dependent on the radio, and the user can toggle it
+        // at any moment. Watching for that is what lets the service recover on its
+        // own instead of sitting dead until it is restarted.
+        ContextCompat.registerReceiver(
+            this,
+            bluetoothStateReceiver,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_EXPORTED
+        )
+
         startBleMesh()
+        publishBluetoothState()
+    }
+
+    /**
+     * Brings the mesh up or tears it down as the adapter is switched on and off.
+     *
+     * Previously `startBleMesh` simply logged and returned when Bluetooth was
+     * disabled, and nothing ever retried — so enabling Bluetooth afterwards left
+     * the app permanently inert until the service was recreated.
+     */
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_ON -> {
+                    Log.i(TAG, "Bluetooth turned on; starting mesh")
+                    // The adapter hands out new scanner/advertiser instances
+                    // across a power cycle, so the old ones must not be reused.
+                    bleScanner = bluetoothAdapter?.bluetoothLeScanner
+                    bleAdvertiser = bluetoothAdapter?.bluetoothLeAdvertiser
+                    startBleMesh()
+                    publishBluetoothState()
+                }
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                    Log.w(TAG, "Bluetooth turned off; tearing down mesh")
+                    stopBleMesh()
+                    publishBluetoothState()
+                }
+            }
+        }
+    }
+
+    /**
+     * Reloads the encryption keys of nodes seen in previous runs.
+     *
+     * Without this, a message composed for a peer that is not on the mesh right
+     * now could not be sealed after a restart, and would sit in the queue
+     * forever even once that peer returned.
+     */
+    private fun restoreKnownNodeKeys() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        var restored = 0
+        prefs.all.forEach { (key, value) ->
+            if (value !is String) return@forEach
+            val isStatic = key.startsWith(PREF_NODE_KEY_PREFIX)
+            val isIdentity = key.startsWith(PREF_NODE_IDENTITY_PREFIX)
+            if (!isStatic && !isIdentity) return@forEach
+
+            val prefix = if (isStatic) PREF_NODE_KEY_PREFIX else PREF_NODE_IDENTITY_PREFIX
+            val row = key.removePrefix(prefix).toLongOrNull() ?: return@forEach
+            val decoded = runCatching { Base64.decode(value, Base64.NO_WRAP) }.getOrNull() ?: return@forEach
+
+            if (isStatic) {
+                peerManager.rememberStaticKey(rowToBeaconId(row), decoded)
+                restored++
+            } else {
+                peerManager.rememberIdentityKey(rowToBeaconId(row), decoded)
+            }
+        }
+        Log.i(TAG, "Restored encryption keys for $restored known node(s)")
+    }
+
+    private fun rememberNodeKey(beaconId: Int, staticKey: ByteArray, identityKey: ByteArray?) {
+        peerManager.rememberStaticKey(beaconId, staticKey)
+        val editor = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+        editor.putString(
+            PREF_NODE_KEY_PREFIX + beaconIdToRow(beaconId),
+            Base64.encodeToString(staticKey, Base64.NO_WRAP)
+        )
+        if (identityKey != null) {
+            peerManager.rememberIdentityKey(beaconId, identityKey)
+            editor.putString(
+                PREF_NODE_IDENTITY_PREFIX + beaconIdToRow(beaconId),
+                Base64.encodeToString(identityKey, Base64.NO_WRAP)
+            )
+        }
+        editor.apply()
+    }
+
+    private fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled == true
+
+    private fun publishBluetoothState() {
+        val enabled = isBluetoothEnabled()
+        updateNotification(enabled)
+        sendBroadcast(
+            Intent(ACTION_BLUETOOTH_STATE).apply {
+                putExtra(EXTRA_BLUETOOTH_ENABLED, enabled)
+                setPackage(packageName)
+            }
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -178,7 +332,10 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                     broadcastMessage(it)
                 }
             }
-            ACTION_SYNC_STATE -> publishRoster()
+            ACTION_SYNC_STATE -> {
+                publishRoster()
+                publishBluetoothState()
+            }
             ACTION_ANNOUNCE_PRESENCE -> announcePresence()
         }
         return START_STICKY
@@ -189,23 +346,28 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
         super.onDestroy()
+        runCatching { unregisterReceiver(bluetoothStateReceiver) }
         handler.removeCallbacksAndMessages(null)
-        bleAdvertiser?.stopAdvertising(advertiseCallback)
+        stopAdvertising()
         stopScanning()
-        gattServer.stop()
-        gattClient.disconnectAll()
+        runCatching { gattServer.stop() }
+        runCatching { gattClient.disconnectAll() }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // BLE bring-up
     // ─────────────────────────────────────────────────────────────────────────
 
+    /** Idempotent: safe to call again whenever the radio comes back on. */
     @SuppressLint("MissingPermission")
     private fun startBleMesh() {
-        if (bluetoothAdapter?.isEnabled != true) {
-            Log.e(TAG, "Bluetooth is disabled.")
+        if (!isBluetoothEnabled()) {
+            Log.w(TAG, "Bluetooth is disabled; mesh stays down until it is enabled.")
             return
         }
+        if (meshRunning) return
+        meshRunning = true
+
         gattServer.start()
         Log.i(TAG, "GATT Server started in startBleMesh()")
 
@@ -219,6 +381,32 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         handler.postDelayed(scanRestartRunnable, SCAN_CYCLE_MS)
         handler.postDelayed(presenceRunnable, PRESENCE_INTERVAL_MS)
         handler.postDelayed(maintenanceRunnable, MAINTENANCE_INTERVAL_MS)
+    }
+
+    /**
+     * Releases every radio resource and forgets all mesh state.
+     *
+     * The roster is cleared rather than left to age out, because with the radio
+     * off nothing is reachable and showing stale peers as online would be a lie.
+     */
+    @SuppressLint("MissingPermission")
+    private fun stopBleMesh() {
+        if (!meshRunning) return
+        meshRunning = false
+
+        handler.removeCallbacks(scanRestartRunnable)
+        handler.removeCallbacks(presenceRunnable)
+        handler.removeCallbacks(maintenanceRunnable)
+
+        stopScanning()
+        stopAdvertising()
+        runCatching { gattClient.disconnectAll() }
+            .onFailure { Log.d(TAG, "GATT client already released: ${it.message}") }
+        runCatching { gattServer.stop() }
+            .onFailure { Log.d(TAG, "GATT server already released: ${it.message}") }
+
+        peerManager.reset()
+        publishRoster()
     }
 
     private val scanRestartRunnable = object : Runnable {
@@ -242,7 +430,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     private val presenceRunnable = object : Runnable {
         override fun run() {
             announcePresence()
-            flushPendingMessages()
+            retryUndeliveredMessages()
             handler.postDelayed(this, PRESENCE_INTERVAL_MS)
         }
     }
@@ -251,6 +439,10 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         override fun run() {
             dedupCache.cleanupExpired(DEDUP_MAX_AGE_SECS)
             peerManager.cleanupExpired()
+            CoroutineScope(Dispatchers.IO).launch {
+                AppDatabase.getDatabase(this@RelayService).custodyDao()
+                    .releaseExpired(System.currentTimeMillis() - CUSTODY_RETENTION_MS)
+            }
             // Entries aging out changes who the UI should show as reachable.
             publishRoster()
             handler.postDelayed(this, MAINTENANCE_INTERVAL_MS)
@@ -285,6 +477,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             .build()
 
         bleAdvertiser?.startAdvertising(settings, advertiseData, scanResponseData, advertiseCallback)
+        isAdvertising = true
         Log.i(TAG, "Started BLE Advertising.")
     }
 
@@ -303,12 +496,27 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     }
 
     @SuppressLint("MissingPermission")
+    private fun stopAdvertising() {
+        if (!isAdvertising) return
+        // The adapter may already be off by the time this runs, in which case the
+        // stack throws rather than returning an error. Teardown must never throw:
+        // the radio is going away regardless, and the bookkeeping below still has
+        // to happen.
+        runCatching { bleAdvertiser?.stopAdvertising(advertiseCallback) }
+            .onFailure { Log.d(TAG, "Advertiser already released: ${it.message}") }
+        isAdvertising = false
+        Log.d(TAG, "Stopped BLE Advertising.")
+    }
+
+    @SuppressLint("MissingPermission")
     private fun stopScanning() {
-        if (isScanning) {
-            bleScanner?.stopScan(scanCallback)
-            isScanning = false
-            Log.d(TAG, "Stopped BLE Scanning for restart.")
-        }
+        if (!isScanning) return
+        // Same as stopAdvertising: once the adapter reports off, stopScan raises
+        // IllegalStateException instead of failing quietly.
+        runCatching { bleScanner?.stopScan(scanCallback) }
+            .onFailure { Log.d(TAG, "Scanner already released: ${it.message}") }
+        isScanning = false
+        Log.d(TAG, "Stopped BLE Scanning.")
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
@@ -386,19 +594,32 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     }
 
     /**
-     * Floods an envelope to every connected neighbour except [excludeAddress],
-     * which is the link it arrived on. Returns how many neighbours accepted it.
+     * Floods an envelope to every neighbouring node except the one it arrived
+     * from. Returns how many distinct nodes accepted it.
+     *
+     * Neighbours are grouped by node id rather than BLE address: Android rotates
+     * resolvable private addresses, so one physical peer routinely shows up
+     * under two addresses at once (its advertisement and its GATT connection).
+     * Sending to each would duplicate every message on the air, and excluding
+     * only the arriving address would bounce a relay straight back to its
+     * source over that peer's other address.
      */
     private fun floodEnvelope(
         envelope: uniffi.meshlink_core.MessageEnvelope,
         excludeAddress: String?
     ): Int {
         val bytes = uniffi.meshlink_core.serializeEnvelope(envelope)
+        val excludedNode = excludeAddress?.let { peerManager.getPeer(it)?.beaconId }
+
         var delivered = 0
-        peerManager.getConnectedPeers().forEach { peer ->
-            if (peer.address == excludeAddress) return@forEach
-            if (sendToNeighbor(peer.address, bytes)) delivered++
-        }
+        peerManager.getConnectedPeers()
+            .groupBy { it.beaconId }
+            .forEach { (beaconId, links) ->
+                if (beaconId == excludedNode) return@forEach
+                // Try each address this node is reachable at; one success is
+                // delivery to that node.
+                if (links.any { sendToNeighbor(it.address, bytes) }) delivered++
+            }
         return delivered
     }
 
@@ -436,12 +657,14 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             displayNameOfSelf()?.let { put("name", it) }
         }.toString().toByteArray()
 
-        val envelope = uniffi.meshlink_core.createEnvelope(
-            senderId = localBeaconId.toUInt(),
-            recipientId = uniffi.meshlink_core.broadcastRecipient(),
-            payload = payload,
-            priority = uniffi.meshlink_core.Priority.BROADCAST,
-            payloadType = uniffi.meshlink_core.PayloadType.PRESENCE
+        val envelope = signed(
+            uniffi.meshlink_core.createEnvelope(
+                senderId = localBeaconId.toUInt(),
+                recipientId = uniffi.meshlink_core.broadcastRecipient(),
+                payload = payload,
+                priority = uniffi.meshlink_core.Priority.BROADCAST,
+                payloadType = uniffi.meshlink_core.PayloadType.PRESENCE
+            )
         )
         rememberOwnMessage(envelope.messageId)
         floodEnvelope(envelope, excludeAddress = null)
@@ -462,6 +685,33 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     }
 
     /**
+     * Signs an envelope this node originated.
+     *
+     * Applied at creation rather than at send time, because relaying must pass a
+     * message on untouched — re-signing someone else's traffic would destroy the
+     * very attribution that makes carrying it safe.
+     */
+    private fun signed(
+        envelope: uniffi.meshlink_core.MessageEnvelope
+    ): uniffi.meshlink_core.MessageEnvelope =
+        uniffi.meshlink_core.signEnvelope(envelope, identityKey)
+
+    /**
+     * Rejects traffic that claims to be from a node whose key we hold but whose
+     * signature does not match. A sender we have never heard of is let through:
+     * its presence announcement carries the key that will authenticate it from
+     * then on, and refusing first contact outright would make the mesh unjoinable.
+     */
+    private fun isAuthentic(envelope: uniffi.meshlink_core.MessageEnvelope): Boolean {
+        if (envelope.payloadType == uniffi.meshlink_core.PayloadType.PRESENCE) {
+            // Verified in handlePresence against the key carried in its own payload.
+            return true
+        }
+        val senderKey = peerManager.identityKeyFor(envelope.senderId.toInt()) ?: return true
+        return uniffi.meshlink_core.verifyEnvelope(envelope, senderKey)
+    }
+
+    /**
      * Sends a direct message to any node in the mesh, neighbour or not.
      *
      * The payload is sealed for the recipient's static key, so relays along the
@@ -469,8 +719,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
      * message is stored as pending and retried once presence gossip supplies it.
      */
     fun sendMessageToNode(beaconId: Int, message: String) {
-        val node = peerManager.getNode(beaconId)
-        val recipientKey = node?.staticKey
+        val recipientKey = peerManager.staticKeyFor(beaconId)
         val messageId = UUID.randomUUID().toString()
 
         val envelope = if (recipientKey != null) {
@@ -517,13 +766,15 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             Log.e(TAG, "Failed to seal message for node $recipientBeaconId")
             return null
         }
-        return uniffi.meshlink_core.createEnvelopeWithId(
-            messageId = messageId,
-            senderId = localBeaconId.toUInt(),
-            recipientId = recipientBeaconId.toUInt(),
-            payload = sealed,
-            priority = uniffi.meshlink_core.Priority.DIRECT,
-            payloadType = uniffi.meshlink_core.PayloadType.TEXT
+        return signed(
+            uniffi.meshlink_core.createEnvelopeWithId(
+                messageId = messageId,
+                senderId = localBeaconId.toUInt(),
+                recipientId = recipientBeaconId.toUInt(),
+                payload = sealed,
+                priority = uniffi.meshlink_core.Priority.DIRECT,
+                payloadType = uniffi.meshlink_core.PayloadType.TEXT
+            )
         )
     }
 
@@ -533,12 +784,14 @@ class RelayService : Service(), GattServerListener, GattClientListener {
      * and is protected only hop by hop.
      */
     fun broadcastMessage(message: String) {
-        val envelope = uniffi.meshlink_core.createEnvelope(
-            senderId = localBeaconId.toUInt(),
-            recipientId = uniffi.meshlink_core.broadcastRecipient(),
-            payload = message.toByteArray(),
-            priority = uniffi.meshlink_core.Priority.BROADCAST,
-            payloadType = uniffi.meshlink_core.PayloadType.TEXT
+        val envelope = signed(
+            uniffi.meshlink_core.createEnvelope(
+                senderId = localBeaconId.toUInt(),
+                recipientId = uniffi.meshlink_core.broadcastRecipient(),
+                payload = message.toByteArray(),
+                priority = uniffi.meshlink_core.Priority.BROADCAST,
+                payloadType = uniffi.meshlink_core.PayloadType.TEXT
+            )
         )
         rememberOwnMessage(envelope.messageId)
         val delivered = floodEnvelope(envelope, excludeAddress = null) > 0
@@ -570,46 +823,239 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     }
 
     /**
-     * Re-attempts anything that had no path when it was composed. A message
-     * queued before its recipient's key was known is sealed now, reusing its
-     * original id so the stored row and the delivered copy stay the same message.
+     * Re-sends every message the recipient has not acknowledged yet.
+     *
+     * Handing a message to a neighbour is not delivery: with flooding, that
+     * neighbour may have no path to the recipient at all, which is why a message
+     * sent while the recipient was offline used to be marked sent and then
+     * silently lost. A message is only finished once its recipient says so, so
+     * this runs on every presence tick and whenever a node reappears.
      */
-    private fun flushPendingMessages() {
+    private fun retryUndeliveredMessages() {
         if (peerManager.getConnectedPeers().isEmpty()) return
-        if (!flushInProgress.compareAndSet(false, true)) return
+        if (!retryInProgress.compareAndSet(false, true)) return
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-            val dao = AppDatabase.getDatabase(this@RelayService).messageDao()
-            dao.getPendingMessages().forEach { pending ->
-                val envelope = if (pending.envelopeData.isNotEmpty()) {
-                    runCatching { uniffi.meshlink_core.deserializeEnvelope(pending.envelopeData) }.getOrNull()
-                } else if (pending.isBroadcast) {
-                    uniffi.meshlink_core.createEnvelopeWithId(
-                        messageId = pending.messageId,
-                        senderId = localBeaconId.toUInt(),
-                        recipientId = uniffi.meshlink_core.broadcastRecipient(),
-                        payload = pending.plaintext.toByteArray(),
-                        priority = uniffi.meshlink_core.Priority.BROADCAST,
-                        payloadType = uniffi.meshlink_core.PayloadType.TEXT
-                    )
-                } else {
+                val dao = AppDatabase.getDatabase(this@RelayService).messageDao()
+                val now = System.currentTimeMillis()
+
+                dao.getUnacknowledgedMessages().forEach { pending ->
+                    if (now - pending.timestamp > MAX_DELIVERY_AGE_MS) return@forEach
+
                     val recipient = rowToBeaconId(pending.recipientId)
-                    peerManager.getNode(recipient)?.staticKey?.let { key ->
-                        buildSealedEnvelope(pending.messageId, recipient, key, pending.plaintext)
+                    if (!peerManager.isReachable(recipient)) {
+                        // The recipient is away. Leave a copy with each node we
+                        // meet so that one of them can deliver it later, even if
+                        // this device is gone by the time the recipient returns.
+                        handToCarriers(pending, recipient)
+                        return@forEach
                     }
+                    if (now < (nextRetryAt[pending.messageId] ?: 0L)) return@forEach
+
+                    val envelope = envelopeFor(pending, recipient) ?: return@forEach
+                    rememberOwnMessage(envelope.messageId)
+                    scheduleNextRetry(pending.messageId, now)
+                    if (floodEnvelope(envelope, excludeAddress = null) > 0 &&
+                        pending.status == "PENDING_RELAY"
+                    ) {
+                        // Handed to the mesh, but not yet acknowledged: the status
+                        // only reaches DELIVERED when the recipient says so.
+                        dao.updateStatus(pending.messageId, "SENT")
+                        notifyMessageStored(recipient)
+                    }
+                    Log.d(TAG, "Re-sent unacknowledged message ${pending.messageId} to $recipient")
                 }
 
-                if (envelope == null) return@forEach
-                rememberOwnMessage(envelope.messageId)
-                if (floodEnvelope(envelope, excludeAddress = null) > 0) {
-                    dao.updateStatus(pending.messageId, "SENT")
-                    Log.d(TAG, "Flushed pending message ${pending.messageId}")
+                // Broadcasts have no single recipient to acknowledge them, so one
+                // successful hand-off to the mesh is all they can be held to.
+                dao.getPendingMessages().filter { it.isBroadcast }.forEach { pending ->
+                    val envelope = signed(
+                        uniffi.meshlink_core.createEnvelopeWithId(
+                            messageId = pending.messageId,
+                            senderId = localBeaconId.toUInt(),
+                            recipientId = uniffi.meshlink_core.broadcastRecipient(),
+                            payload = pending.plaintext.toByteArray(),
+                            priority = uniffi.meshlink_core.Priority.BROADCAST,
+                            payloadType = uniffi.meshlink_core.PayloadType.TEXT
+                        )
+                    )
+                    rememberOwnMessage(envelope.messageId)
+                    if (floodEnvelope(envelope, excludeAddress = null) > 0) {
+                        dao.updateStatus(pending.messageId, "SENT")
+                        notifyMessageStored(0)
+                    }
                 }
-            }
             } finally {
-                flushInProgress.set(false)
+                retryInProgress.set(false)
             }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Custody: carrying messages for nodes that are not here right now
+    //
+    // Flooding only works while sender and recipient are on the mesh together.
+    // When a relay holds on to a message it could not deliver, the two never have
+    // to be present at the same moment: the relay carries it across the gap.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Decides whether to carry a message this node has just relayed.
+     *
+     * Deliberately selective. A message is only worth storing when it is
+     * addressed to a specific node this device has actually heard of, that node
+     * is not reachable now, and the sender signed it — otherwise anyone in radio
+     * range could fill this store with traffic attributed to someone else.
+     */
+    private fun considerCustody(envelope: uniffi.meshlink_core.MessageEnvelope) {
+        val recipient = envelope.recipientId.toInt()
+        if (recipient == uniffi.meshlink_core.broadcastRecipient().toInt()) return
+        if (recipient == localBeaconId) return
+        if (envelope.payloadType == uniffi.meshlink_core.PayloadType.ACK ||
+            envelope.payloadType == uniffi.meshlink_core.PayloadType.PRESENCE
+        ) return
+        if (!peerManager.isKnown(recipient)) return
+        if (peerManager.isReachable(recipient)) return
+
+        val senderKey = peerManager.identityKeyFor(envelope.senderId.toInt()) ?: return
+        if (!uniffi.meshlink_core.verifyEnvelope(envelope, senderKey)) return
+
+        val bytes = uniffi.meshlink_core.serializeEnvelope(envelope)
+        CoroutineScope(Dispatchers.IO).launch {
+            val dao = AppDatabase.getDatabase(this@RelayService).custodyDao()
+            dao.insert(
+                CustodyEntity(
+                    messageId = envelope.messageId,
+                    recipientId = beaconIdToRow(recipient),
+                    envelopeData = bytes,
+                    receivedAt = System.currentTimeMillis(),
+                    isSos = envelope.priority == uniffi.meshlink_core.Priority.SOS
+                )
+            )
+            val excess = dao.count() - MAX_CUSTODY_ENTRIES
+            if (excess > 0) dao.evictLeastValuable(excess)
+            Log.i(TAG, "Carrying ${envelope.messageId} for $recipient until it returns")
+        }
+    }
+
+    /** Stops carrying a message once its recipient has acknowledged it. */
+    private fun releaseCustody(messageId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val dao = AppDatabase.getDatabase(this@RelayService).custodyDao()
+            if (dao.contains(messageId)) {
+                dao.release(messageId)
+                Log.i(TAG, "Released custody of $messageId; it has been delivered")
+            }
+        }
+    }
+
+    /** Hands over everything being carried for a node that has just reappeared. */
+    private fun offerCustodyTo(beaconId: Int) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val carried = AppDatabase.getDatabase(this@RelayService).custodyDao()
+                .forRecipient(beaconIdToRow(beaconId))
+            if (carried.isEmpty()) return@launch
+
+            carried.forEach { entry ->
+                val envelope = runCatching {
+                    uniffi.meshlink_core.deserializeEnvelope(entry.envelopeData)
+                }.getOrNull() ?: return@forEach
+                floodEnvelope(envelope, excludeAddress = null)
+            }
+            Log.i(TAG, "Offered ${carried.size} carried message(s) to $beaconId")
+        }
+    }
+
+    /**
+     * Gives an undelivered message to any neighbour that has not already been
+     * offered it, so those neighbours can carry it to a recipient this device may
+     * never be present for.
+     *
+     * Offered once per neighbour rather than on every tick: the point is to seed
+     * copies across the nodes we meet, not to keep re-sending to the same ones.
+     */
+    private fun handToCarriers(pending: MessageEntity, recipient: Int) {
+        val neighbours = peerManager.getConnectedPeers().map { it.beaconId }.distinct()
+        if (neighbours.isEmpty()) return
+
+        val alreadyOffered = offeredToCarriers.getOrPut(pending.messageId) {
+            ConcurrentHashMap.newKeySet()
+        }
+        val fresh = neighbours.filter { alreadyOffered.add(it) }
+        if (fresh.isEmpty()) return
+
+        val envelope = envelopeFor(pending, recipient) ?: return
+        rememberOwnMessage(envelope.messageId)
+        floodEnvelope(envelope, excludeAddress = null)
+        Log.d(TAG, "Handed ${pending.messageId} to ${fresh.size} new carrier(s) for $recipient")
+    }
+
+    /** Backs the next attempt off exponentially, capped at [RETRY_MAX_GAP_MS]. */
+    private fun scheduleNextRetry(messageId: String, now: Long) {
+        val attempt = (retryAttempts[messageId] ?: 0) + 1
+        retryAttempts[messageId] = attempt
+        val gap = (RETRY_BASE_GAP_MS shl minOf(attempt - 1, 5)).coerceAtMost(RETRY_MAX_GAP_MS)
+        nextRetryAt[messageId] = now + gap
+    }
+
+    /**
+     * Rebuilds the envelope for a queued message, reusing the stored copy when
+     * there is one and sealing it now when the recipient's key only became known
+     * after it was composed.
+     */
+    private fun envelopeFor(
+        pending: MessageEntity,
+        recipient: Int
+    ): uniffi.meshlink_core.MessageEnvelope? {
+        if (pending.envelopeData.isNotEmpty()) {
+            return runCatching {
+                uniffi.meshlink_core.deserializeEnvelope(pending.envelopeData)
+            }.getOrNull()
+        }
+        val key = peerManager.staticKeyFor(recipient) ?: return null
+        return buildSealedEnvelope(pending.messageId, recipient, key, pending.plaintext)
+    }
+
+    /**
+     * Tells [toBeaconId] that one of its messages arrived.
+     *
+     * Sealing the acknowledgement against the sender's key means a relay cannot
+     * forge one, so a message is only ever marked delivered on the word of the
+     * node that actually received it.
+     */
+    private fun acknowledge(toBeaconId: Int, acknowledgedMessageId: String) {
+        val key = peerManager.staticKeyFor(toBeaconId) ?: return
+        val sealed = staticKeys.seal(key, acknowledgedMessageId.toByteArray())
+        if (sealed.isEmpty()) return
+
+        // The acknowledged id travels in the clear so relays carrying that
+        // message learn it was delivered and can stop carrying it.
+        val envelope = signed(
+            uniffi.meshlink_core.createAckEnvelope(
+                senderId = localBeaconId.toUInt(),
+                recipientId = toBeaconId.toUInt(),
+                payload = sealed,
+                ackFor = acknowledgedMessageId
+            )
+        )
+        rememberOwnMessage(envelope.messageId)
+        floodEnvelope(envelope, excludeAddress = null)
+    }
+
+    /** Marks one of our messages delivered on the recipient's acknowledgement. */
+    private fun handleAcknowledgement(envelope: uniffi.meshlink_core.MessageEnvelope) {
+        val acknowledgedId = openPayload(envelope) ?: return
+        val senderId = envelope.senderId.toInt()
+        // Settled: stop tracking it so the schedule cannot grow without bound.
+        nextRetryAt.remove(acknowledgedId)
+        retryAttempts.remove(acknowledgedId)
+        offeredToCarriers.remove(acknowledgedId)
+        CoroutineScope(Dispatchers.IO).launch {
+            AppDatabase.getDatabase(this@RelayService).messageDao()
+                .updateStatus(acknowledgedId, "DELIVERED")
+            notifyMessageStored(senderId)
+            Log.i(TAG, "Message $acknowledgedId acknowledged by $senderId")
         }
     }
 
@@ -625,9 +1071,25 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             return
         }
 
+        if (!isAuthentic(envelope)) {
+            Log.w(TAG, "Rejected envelope with a bad signature from ${envelope.senderId}")
+            return
+        }
+
+        // Snoop acknowledgements in passing, whatever else happens to this
+        // envelope: if we are carrying the message it settles, we can stop.
+        envelope.ackFor?.let { releaseCustody(it) }
+
         val action = uniffi.meshlink_core.processIncoming(envelope, localBeaconId.toUInt(), dedupCache)
         if (action == uniffi.meshlink_core.ProcessAction.DROP) {
             Log.d(TAG, "Dropped message from ${device.address}")
+            return
+        }
+        if (action == uniffi.meshlink_core.ProcessAction.ACKNOWLEDGE_ONLY) {
+            // Already have it; the sender is retrying because our acknowledgement
+            // never made it back. Answer again instead of leaving it stuck.
+            Log.d(TAG, "Re-acknowledging ${envelope.messageId}")
+            acknowledge(envelope.senderId.toInt(), envelope.messageId)
             return
         }
 
@@ -647,6 +1109,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             if (forwarded != null) {
                 val count = floodEnvelope(forwarded, excludeAddress = device.address)
                 Log.i(TAG, "Relayed ${envelope.messageId} from ${device.address} to $count neighbour(s)")
+                considerCustody(forwarded)
             }
         }
     }
@@ -656,11 +1119,15 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             handlePresence(envelope)
             return
         }
+        if (envelope.payloadType == uniffi.meshlink_core.PayloadType.ACK) {
+            handleAcknowledgement(envelope)
+            return
+        }
 
         val senderId = envelope.senderId.toInt()
         val isBroadcast = envelope.priority == uniffi.meshlink_core.Priority.BROADCAST
 
-        if (!isBroadcast && peerManager.getNode(senderId)?.staticKey == null) {
+        if (!isBroadcast && peerManager.staticKeyFor(senderId) == null) {
             deferUntilSenderKnown(senderId, envelope)
             return
         }
@@ -668,6 +1135,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         val plaintext = openPayload(envelope) ?: return
 
         Log.i(TAG, "Delivering message from $senderId (${uniffi.meshlink_core.envelopeHops(envelope)} hop(s))")
+
+        showMessageNotification(senderId, plaintext, isBroadcast)
 
         CoroutineScope(Dispatchers.IO).launch {
             AppDatabase.getDatabase(this@RelayService).messageDao().insertMessage(
@@ -683,17 +1152,24 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                     isBroadcast = isBroadcast
                 )
             )
-        }
 
-        showMessageNotification(senderId, plaintext, isBroadcast)
+            // Announce only once the row is committed. The activities respond by
+            // re-querying the database, so notifying them from the calling thread
+            // while the insert was still in flight let them read the table just
+            // before the new row landed: the message silently failed to appear
+            // until some later event triggered another refresh.
+            val intent = Intent(ACTION_MESSAGE_RECEIVED).apply {
+                putExtra(EXTRA_MESSAGE_DATA, plaintext)
+                putExtra(EXTRA_SENDER_BEACON, senderId)
+                putExtra(EXTRA_IS_BROADCAST, isBroadcast)
+                setPackage(packageName)
+            }
+            sendBroadcast(intent)
 
-        val intent = Intent(ACTION_MESSAGE_RECEIVED).apply {
-            putExtra(EXTRA_MESSAGE_DATA, plaintext)
-            putExtra(EXTRA_SENDER_BEACON, senderId)
-            putExtra(EXTRA_IS_BROADCAST, isBroadcast)
-            setPackage(packageName)
+            // Acknowledge only once the message is safely stored, so a delivery
+            // receipt never outruns the copy it is vouching for.
+            if (!isBroadcast) acknowledge(senderId, envelope.messageId)
         }
-        sendBroadcast(intent)
     }
 
     /**
@@ -706,7 +1182,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             return String(envelope.encryptedPayload)
         }
         val senderId = envelope.senderId.toInt()
-        val senderKey = peerManager.getNode(senderId)?.staticKey ?: return null
+        val senderKey = peerManager.staticKeyFor(senderId) ?: return null
         val opened = staticKeys.open(senderKey, envelope.encryptedPayload)
         if (opened == null) {
             Log.w(TAG, "Message from $senderId failed to open; discarding")
@@ -763,22 +1239,30 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                 Log.w(TAG, "Presence for $beaconId does not match its identity key; ignoring")
                 return
             }
+            // Anyone can echo a public key; only its owner can sign with it. This
+            // is what stops a node inventing peers to make others carry traffic.
+            if (!uniffi.meshlink_core.verifyEnvelope(envelope, identityKey)) {
+                Log.w(TAG, "Presence for $beaconId is not signed by its identity key; ignoring")
+                return
+            }
         }
 
         val name = json.optString("name").takeIf { it.isNotBlank() }
         val hops = uniffi.meshlink_core.envelopeHops(envelope).toInt()
 
         peerManager.recordNode(beaconId, identityKey, staticKey, name, hops)
+        if (staticKey != null) rememberNodeKey(beaconId, staticKey, identityKey)
         if (name != null) {
             getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                .putString("peer_name_$beaconId", name).apply()
+                .putString(peerNameKey(beaconId), name).apply()
         }
         Log.d(TAG, "Presence: node $beaconId at $hops hop(s)${name?.let { " ($it)" } ?: ""}")
 
         publishRoster()
         // This node's key may be exactly what queued or held messages needed.
         drainDeferred(beaconId)
-        flushPendingMessages()
+        offerCustodyTo(beaconId)
+        retryUndeliveredMessages()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -824,7 +1308,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         // Introduce ourselves immediately so the new neighbour — and everything
         // behind it — learns our keys without waiting for the next tick.
         announcePresence()
-        flushPendingMessages()
+        offerCustodyTo(beaconId)
+        retryUndeliveredMessages()
     }
 
     override fun onHandshakeFailed(device: BluetoothDevice, reason: String) {
@@ -850,7 +1335,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
     private fun displayNameFor(beaconId: Int): String {
         val stored = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString("peer_name_$beaconId", null)
+            .getString(peerNameKey(beaconId), null)
         return stored?.takeIf { it.isNotBlank() } ?: defaultNodeName(beaconId)
     }
 
@@ -868,12 +1353,20 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         manager.createNotificationChannel(messageChannel)
     }
 
-    private fun createNotification(): Notification =
+    private fun createNotification(bluetoothEnabled: Boolean = true): Notification =
         Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("MeshLink Active")
-            .setContentText("Relaying messages for the mesh network")
+            .setContentTitle(if (bluetoothEnabled) "MeshLink Active" else "MeshLink Paused")
+            .setContentText(
+                if (bluetoothEnabled) "Relaying messages for the mesh network"
+                else "Bluetooth is off — turn it on to rejoin the mesh"
+            )
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
+
+    private fun updateNotification(bluetoothEnabled: Boolean) {
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, createNotification(bluetoothEnabled))
+    }
 
     private fun showMessageNotification(senderId: Int, message: String, isBroadcast: Boolean) {
         val senderName = displayNameFor(senderId)

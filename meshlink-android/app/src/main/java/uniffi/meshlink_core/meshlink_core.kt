@@ -783,6 +783,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -866,6 +872,8 @@ internal interface UniffiLib : Library {
     ): Int
     fun uniffi_meshlink_core_fn_func_broadcast_recipient(uniffi_out_err: UniffiRustCallStatus, 
     ): Int
+    fun uniffi_meshlink_core_fn_func_create_ack_envelope(`senderId`: Int,`recipientId`: Int,`payload`: RustBuffer.ByValue,`ackFor`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_meshlink_core_fn_func_create_envelope(`senderId`: Int,`recipientId`: Int,`payload`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`payloadType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_meshlink_core_fn_func_create_envelope_with_id(`messageId`: RustBuffer.ByValue,`senderId`: Int,`recipientId`: Int,`payload`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`payloadType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -900,6 +908,10 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_meshlink_core_fn_func_serialize_handshake(`payload`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_meshlink_core_fn_func_sign_envelope(`envelope`: RustBuffer.ByValue,`identityKey`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_meshlink_core_fn_func_verify_envelope(`envelope`: RustBuffer.ByValue,`identityPublicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     fun uniffi_meshlink_core_fn_func_verify_handshake_payload(`payload`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_meshlink_core_fn_func_verify_signature(`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1020,6 +1032,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_meshlink_core_checksum_func_broadcast_recipient(
     ): Short
+    fun uniffi_meshlink_core_checksum_func_create_ack_envelope(
+    ): Short
     fun uniffi_meshlink_core_checksum_func_create_envelope(
     ): Short
     fun uniffi_meshlink_core_checksum_func_create_envelope_with_id(
@@ -1053,6 +1067,10 @@ internal interface UniffiLib : Library {
     fun uniffi_meshlink_core_checksum_func_serialize_for_signing(
     ): Short
     fun uniffi_meshlink_core_checksum_func_serialize_handshake(
+    ): Short
+    fun uniffi_meshlink_core_checksum_func_sign_envelope(
+    ): Short
+    fun uniffi_meshlink_core_checksum_func_verify_envelope(
     ): Short
     fun uniffi_meshlink_core_checksum_func_verify_handshake_payload(
     ): Short
@@ -1121,6 +1139,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_meshlink_core_checksum_func_broadcast_recipient() != 35799.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_meshlink_core_checksum_func_create_ack_envelope() != 22678.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_meshlink_core_checksum_func_create_envelope() != 24816.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1170,6 +1191,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_meshlink_core_checksum_func_serialize_handshake() != 64883.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_func_sign_envelope() != 63729.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_func_verify_envelope() != 16443.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_meshlink_core_checksum_func_verify_handshake_payload() != 57402.toShort()) {
@@ -2893,8 +2920,17 @@ data class MessageEnvelope (
      */
     var `encryptedPayload`: kotlin.ByteArray, 
     /**
-     * Ed25519 signature over `serialize_for_signing`. Currently populated only
-     * by senders that choose to sign; relays do not require it.
+     * For an `Ack`, the id of the message being acknowledged, in the clear.
+     *
+     * The sealed payload proves *who* acknowledged, but only the sender can
+     * open it. Relays carrying a copy of that message on the sender's behalf
+     * need to know it was delivered so they can stop carrying it, which is why
+     * this one field is readable by everyone the acknowledgement passes.
+     */
+    var `ackFor`: kotlin.String?, 
+    /**
+     * Ed25519 signature over `serialize_for_signing`, proving the envelope was
+     * produced by the holder of `sender_id`'s identity key.
      */
     var `signature`: kotlin.ByteArray
 ) {
@@ -2913,6 +2949,7 @@ public object FfiConverterTypeMessageEnvelope: FfiConverterRustBuffer<MessageEnv
             FfiConverterUInt.read(buf),
             FfiConverterTypePayloadType.read(buf),
             FfiConverterByteArray.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterByteArray.read(buf),
         )
     }
@@ -2926,6 +2963,7 @@ public object FfiConverterTypeMessageEnvelope: FfiConverterRustBuffer<MessageEnv
             FfiConverterUInt.allocationSize(value.`timestamp`) +
             FfiConverterTypePayloadType.allocationSize(value.`payloadType`) +
             FfiConverterByteArray.allocationSize(value.`encryptedPayload`) +
+            FfiConverterOptionalString.allocationSize(value.`ackFor`) +
             FfiConverterByteArray.allocationSize(value.`signature`)
     )
 
@@ -2938,6 +2976,7 @@ public object FfiConverterTypeMessageEnvelope: FfiConverterRustBuffer<MessageEnv
             FfiConverterUInt.write(value.`timestamp`, buf)
             FfiConverterTypePayloadType.write(value.`payloadType`, buf)
             FfiConverterByteArray.write(value.`encryptedPayload`, buf)
+            FfiConverterOptionalString.write(value.`ackFor`, buf)
             FfiConverterByteArray.write(value.`signature`, buf)
     }
 }
@@ -3065,6 +3104,12 @@ enum class ProcessAction {
     DELIVER_LOCAL,
     RELAY,
     DELIVER_AND_RELAY,
+    /**
+     * Already delivered earlier, but the sender is evidently still waiting: it
+     * re-sent because our acknowledgement never arrived. Acknowledge again
+     * without delivering a second copy.
+     */
+    ACKNOWLEDGE_ONLY,
     DROP;
     companion object
 }
@@ -3085,6 +3130,35 @@ public object FfiConverterTypeProcessAction: FfiConverterRustBuffer<ProcessActio
 }
 
 
+
+
+
+
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
+    override fun read(buf: ByteBuffer): kotlin.String? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterString.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.String?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.String?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterString.write(value, buf)
+        }
+    }
+}
 
 
 
@@ -3167,6 +3241,19 @@ public object FfiConverterOptionalTypeMessageEnvelope: FfiConverterRustBuffer<Me
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_broadcast_recipient(
         _status)
+}
+    )
+    }
+    
+
+        /**
+         * Builds an acknowledgement, carrying the acknowledged id in the clear so that
+         * relays holding a copy of that message can stop carrying it.
+         */ fun `createAckEnvelope`(`senderId`: kotlin.UInt, `recipientId`: kotlin.UInt, `payload`: kotlin.ByteArray, `ackFor`: kotlin.String): MessageEnvelope {
+            return FfiConverterTypeMessageEnvelope.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_create_ack_envelope(
+        FfiConverterUInt.lower(`senderId`),FfiConverterUInt.lower(`recipientId`),FfiConverterByteArray.lower(`payload`),FfiConverterString.lower(`ackFor`),_status)
 }
     )
     }
@@ -3343,6 +3430,34 @@ public object FfiConverterOptionalTypeMessageEnvelope: FfiConverterRustBuffer<Me
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_serialize_handshake(
         FfiConverterTypeHandshakePayload.lower(`payload`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Signs an envelope with the sender's long-term identity key.
+         *
+         * Signing matters most once nodes store messages for each other: without it any
+         * device in radio range could fill a relay's store with traffic attributed to
+         * someone else.
+         */ fun `signEnvelope`(`envelope`: MessageEnvelope, `identityKey`: IdentityKeyPair): MessageEnvelope {
+            return FfiConverterTypeMessageEnvelope.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_sign_envelope(
+        FfiConverterTypeMessageEnvelope.lower(`envelope`),FfiConverterTypeIdentityKeyPair.lower(`identityKey`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Checks an envelope against the claimed sender's identity public key.
+         */ fun `verifyEnvelope`(`envelope`: MessageEnvelope, `identityPublicKey`: kotlin.ByteArray): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_verify_envelope(
+        FfiConverterTypeMessageEnvelope.lower(`envelope`),FfiConverterByteArray.lower(`identityPublicKey`),_status)
 }
     )
     }

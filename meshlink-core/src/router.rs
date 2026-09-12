@@ -7,6 +7,10 @@ pub enum ProcessAction {
     DeliverLocal,
     Relay,
     DeliverAndRelay,
+    /// Already delivered earlier, but the sender is evidently still waiting: it
+    /// re-sent because our acknowledgement never arrived. Acknowledge again
+    /// without delivering a second copy.
+    AcknowledgeOnly,
     Drop,
 }
 
@@ -35,7 +39,13 @@ pub fn process_incoming(
     }
 
     if dedup_cache.is_duplicate(&envelope.message_id) {
-        return ProcessAction::Drop;
+        // A retransmission of something addressed to us means our acknowledgement
+        // was lost. Dropping it silently would leave the sender retrying forever.
+        return if envelope.recipient_id == local_id && envelope.payload_type != PayloadType::Ack {
+            ProcessAction::AcknowledgeOnly
+        } else {
+            ProcessAction::Drop
+        };
     }
     dedup_cache.record_message(&envelope.message_id);
 

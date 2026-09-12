@@ -45,8 +45,15 @@ pub struct MessageEnvelope {
     /// being able to read it. For mesh-wide traffic (broadcast, presence) there
     /// is no single recipient key, so it carries plaintext bytes.
     pub encrypted_payload: Vec<u8>,
-    /// Ed25519 signature over `serialize_for_signing`. Currently populated only
-    /// by senders that choose to sign; relays do not require it.
+    /// For an `Ack`, the id of the message being acknowledged, in the clear.
+    ///
+    /// The sealed payload proves *who* acknowledged, but only the sender can
+    /// open it. Relays carrying a copy of that message on the sender's behalf
+    /// need to know it was delivered so they can stop carrying it, which is why
+    /// this one field is readable by everyone the acknowledgement passes.
+    pub ack_for: Option<String>,
+    /// Ed25519 signature over `serialize_for_signing`, proving the envelope was
+    /// produced by the holder of `sender_id`'s identity key.
     pub signature: Vec<u8>,
 }
 
@@ -73,6 +80,7 @@ impl MessageEnvelope {
             timestamp,
             payload_type,
             encrypted_payload: payload,
+            ack_for: None,
             signature: vec![],
         }
     }
@@ -111,6 +119,7 @@ impl MessageEnvelope {
             timestamp: u32,
             payload_type: &'a PayloadType,
             encrypted_payload: &'a Vec<u8>,
+            ack_for: &'a Option<String>,
         }
 
         let payload = SigningPayload {
@@ -121,6 +130,7 @@ impl MessageEnvelope {
             timestamp: self.timestamp,
             payload_type: &self.payload_type,
             encrypted_payload: &self.encrypted_payload,
+            ack_for: &self.ack_for,
         };
 
         serde_json::to_vec(&payload).unwrap_or_default()

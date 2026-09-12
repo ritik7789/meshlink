@@ -1,6 +1,8 @@
 package com.meshlink
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -17,6 +19,7 @@ import android.provider.Settings
 import android.net.Uri
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -38,6 +41,34 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rvConversations: RecyclerView
     private lateinit var btnBroadcast: FloatingActionButton
     private lateinit var tvEmptyState: TextView
+    private lateinit var bannerBluetooth: View
+    private lateinit var statusDot: View
+
+    private var bluetoothEnabled = true
+
+    /**
+     * Whether the system enable-dialog has already been offered for this instance
+     * of the screen. It is deliberately not reset in `onStop`: the system prompt
+     * runs in its own activity, so stopping this one is part of the normal ask
+     * flow, and clearing the flag there made a declined prompt reappear
+     * instantly in a loop. It resets when the screen is created again, so a
+     * fresh launch asks once more, and the banner offers it any time in between.
+     */
+    private var promptedForBluetooth = false
+
+    /**
+     * Result is judged by the adapter's actual state rather than the result code:
+     * some OEM builds report RESULT_CANCELED even after the user agrees.
+     */
+    private val enableBluetoothLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK || isBluetoothOn()) {
+            refreshBluetoothState()
+        } else {
+            showBluetoothDeclinedDialog()
+        }
+    }
     
     private lateinit var conversationAdapter: ConversationAdapter
 
@@ -55,6 +86,12 @@ class MainActivity : AppCompatActivity() {
                     applyRoster(intent)
                     updateUI()
                 }
+                RelayService.ACTION_BLUETOOTH_STATE -> {
+                    bluetoothEnabled = intent.getBooleanExtra(
+                        RelayService.EXTRA_BLUETOOTH_ENABLED, true
+                    )
+                    applyBluetoothState()
+                }
                 RelayService.ACTION_MESSAGE_RECEIVED,
                 RelayService.ACTION_MESSAGE_SENT -> loadConversations()
             }
@@ -67,6 +104,8 @@ class MainActivity : AppCompatActivity() {
         
         tvStatus = findViewById(R.id.tvStatus)
         tvEmptyState = findViewById(R.id.tvEmptyState)
+        bannerBluetooth = findViewById(R.id.bannerBluetooth)
+        statusDot = findViewById(R.id.vStatusDot)
         rvConversations = findViewById(R.id.rvConversations)
         btnBroadcast = findViewById(R.id.btnBroadcast)
 
@@ -84,6 +123,11 @@ class MainActivity : AppCompatActivity() {
 
         btnBroadcast.setOnClickListener { showNewChatDialog() }
 
+        // Both the banner and its action label re-open the enable prompt, so a
+        // user who dismissed it once still has an obvious way back.
+        bannerBluetooth.setOnClickListener { promptEnableBluetooth() }
+        findViewById<TextView>(R.id.btnEnableBluetooth).setOnClickListener { promptEnableBluetooth() }
+
         val toolbar = findViewById<androidx.appcompat.widget.Toolbar>(R.id.toolbar)
         toolbar.setTitleTextColor(android.graphics.Color.WHITE)
         toolbar.title = "MeshLink"
@@ -96,6 +140,7 @@ class MainActivity : AppCompatActivity() {
         super.onStart()
         val filter = IntentFilter().apply {
             addAction(RelayService.ACTION_ROSTER_UPDATED)
+            addAction(RelayService.ACTION_BLUETOOTH_STATE)
             addAction(RelayService.ACTION_MESSAGE_RECEIVED)
             addAction(RelayService.ACTION_MESSAGE_SENT)
         }
@@ -112,7 +157,89 @@ class MainActivity : AppCompatActivity() {
             startService(syncIntent)
         }
 
+        refreshBluetoothState()
         loadConversations()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        unregisterReceiver(serviceReceiver)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bluetooth availability
+    //
+    // Every feature of this app rides on the BLE radio, so a disabled adapter is
+    // not a detail to fail silently on: the user is asked to turn it on, told
+    // plainly if they decline, and given a permanent way back.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun bluetoothAdapter(): BluetoothAdapter? =
+        (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+
+    private fun isBluetoothOn(): Boolean = bluetoothAdapter()?.isEnabled == true
+
+    /** Re-reads the adapter and offers the enable prompt once per visit. */
+    private fun refreshBluetoothState() {
+        bluetoothEnabled = isBluetoothOn()
+        applyBluetoothState()
+
+        if (!bluetoothEnabled && !promptedForBluetooth && hasCriticalPermissions()) {
+            promptEnableBluetooth()
+        }
+    }
+
+    private fun applyBluetoothState() {
+        bannerBluetooth.visibility = if (bluetoothEnabled) View.GONE else View.VISIBLE
+        updateStatusLabel()
+    }
+
+    private fun promptEnableBluetooth() {
+        if (isBluetoothOn()) {
+            refreshBluetoothState()
+            return
+        }
+        if (bluetoothAdapter() == null) {
+            Toast.makeText(this, "This device has no Bluetooth adapter.", Toast.LENGTH_LONG).show()
+            return
+        }
+        // Asking for the system dialog needs BLUETOOTH_CONNECT on Android 12+.
+        if (!hasCriticalPermissions()) {
+            checkAndRequestPermissions()
+            return
+        }
+        promptedForBluetooth = true
+        try {
+            enableBluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+        } catch (e: SecurityException) {
+            showBluetoothSettingsFallback()
+        }
+    }
+
+    private fun showBluetoothDeclinedDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Bluetooth Required")
+            .setMessage(
+                "MeshLink forms its off-grid network over Bluetooth. " +
+                    "Until Bluetooth is on, this device cannot discover nodes, " +
+                    "send messages, or relay for anyone else.\n\n" +
+                    "You can turn it on later from the banner at the top of the screen."
+            )
+            .setPositiveButton("Turn On") { _, _ -> promptEnableBluetooth() }
+            .setNegativeButton("Not Now", null)
+            .show()
+    }
+
+    /** Last resort when the in-app prompt is refused by the platform. */
+    private fun showBluetoothSettingsFallback() {
+        AlertDialog.Builder(this)
+            .setTitle("Enable Bluetooth")
+            .setMessage("MeshLink could not open the Bluetooth prompt. Please enable Bluetooth in Settings.")
+            .setPositiveButton("Open Settings") { _, _ ->
+                startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /** Permissions RelayService needs before it can start its foreground BLE mesh. */
@@ -135,11 +262,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onStop() {
-        super.onStop()
-        unregisterReceiver(serviceReceiver)
-    }
-    
     private fun loadConversations() {
         CoroutineScope(Dispatchers.IO).launch {
             val convos = db.messageDao().getConversationList()
@@ -176,6 +298,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUI() {
+        updateStatusLabel()
+        conversationAdapter.setReachableNodes(reachableNodes)
+        loadConversations()
+    }
+
+    /**
+     * Summarises reachability in the toolbar. A disabled radio takes precedence
+     * over the node count: reporting "No nodes reachable" when Bluetooth is off
+     * reads as "nobody is around" rather than "this device cannot look".
+     */
+    private fun updateStatusLabel() {
+        val live = bluetoothEnabled && reachableNodes.isNotEmpty()
+        statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            android.graphics.Color.parseColor(if (live) "#4DCA59" else "#8E9BA7")
+        )
+        if (!bluetoothEnabled) {
+            tvStatus.text = "Bluetooth off"
+            return
+        }
         val direct = reachableNodes.count { it.value <= 1 }
         val relayed = reachableNodes.size - direct
         tvStatus.text = when {
@@ -183,8 +324,6 @@ class MainActivity : AppCompatActivity() {
             relayed == 0 -> "$direct node${if (direct == 1) "" else "s"} reachable"
             else -> "${reachableNodes.size} nodes reachable ($direct direct, $relayed relayed)"
         }
-        conversationAdapter.setReachableNodes(reachableNodes)
-        loadConversations()
     }
 
     private fun openChat(peerId: Long) {

@@ -185,17 +185,25 @@ class GattClient(
             next
         } ?: return
 
-        val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(
-                characteristic, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            ) == android.bluetooth.BluetoothStatusCodes.SUCCESS
-        } else {
-            @Suppress("DEPRECATION")
-            run {
-                characteristic.value = chunk
-                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                gatt.writeCharacteristic(characteristic)
+        // OEM stacks reject malformed or oversized frames by throwing rather than
+        // returning a status, and this runs on the main looper, so an uncaught
+        // throw would take the whole service down mid-flood.
+        val ok = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(
+                    characteristic, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                ) == android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    characteristic.value = chunk
+                    characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    gatt.writeCharacteristic(characteristic)
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Write to $deviceAddress threw: ${e.message}")
+            false
         }
 
         if (!ok) {

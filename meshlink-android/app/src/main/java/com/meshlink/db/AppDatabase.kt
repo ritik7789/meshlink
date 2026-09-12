@@ -8,9 +8,10 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [MessageEntity::class], version = 3, exportSchema = false)
+@Database(entities = [MessageEntity::class, CustodyEntity::class], version = 4, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
+    abstract fun custodyDao(): CustodyDao
 
     companion object {
         @Volatile
@@ -22,6 +23,24 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Adds the store of messages carried on other nodes' behalf. */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `custody` (
+                        `messageId` TEXT NOT NULL,
+                        `recipientId` INTEGER NOT NULL,
+                        `envelopeData` BLOB NOT NULL,
+                        `receivedAt` INTEGER NOT NULL,
+                        `isSos` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageId`)
+                    )
+                    """
+                )
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -29,7 +48,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "meshlink_database"
                 )
-                .addMigrations(MIGRATION_2_3)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

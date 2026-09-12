@@ -90,7 +90,9 @@ impl Mesh {
             let action = process_incoming(env.clone(), local_id, dedup);
 
             match action {
-                ProcessAction::Drop => continue,
+                // Neither delivers nor forwards: the simulation has no ack path,
+                // so it behaves as a stop here.
+                ProcessAction::Drop | ProcessAction::AcknowledgeOnly => continue,
                 ProcessAction::DeliverLocal => {
                     self.nodes[index].delivered.push(env);
                 }
@@ -346,4 +348,137 @@ fn a_node_ignores_its_own_traffic_coming_back() {
     // it returns over a second path before the local copy was cached.
     let action = process_incoming(envelope, node.id, Arc::clone(&node.dedup));
     assert_eq!(action, ProcessAction::Drop);
+}
+
+#[test]
+fn a_retransmission_of_a_delivered_message_is_re_acknowledged() {
+    let node = Node::new(11);
+    let envelope = MessageEnvelope::new(
+        999,
+        node.id,
+        b"sealed".to_vec(),
+        Priority::Direct,
+        PayloadType::Text,
+        INITIAL_TTL,
+    );
+
+    // First arrival is delivered normally.
+    assert_eq!(
+        process_incoming(envelope.clone(), node.id, Arc::clone(&node.dedup)),
+        ProcessAction::DeliverLocal
+    );
+
+    // The sender retries because our acknowledgement was lost. Dropping it as a
+    // plain duplicate would strand the sender retrying forever.
+    assert_eq!(
+        process_incoming(envelope, node.id, Arc::clone(&node.dedup)),
+        ProcessAction::AcknowledgeOnly
+    );
+}
+
+#[test]
+fn a_duplicate_acknowledgement_is_dropped_rather_than_acknowledged() {
+    let node = Node::new(12);
+    let ack = MessageEnvelope::new(
+        999,
+        node.id,
+        b"acked-id".to_vec(),
+        Priority::Direct,
+        PayloadType::Ack,
+        INITIAL_TTL,
+    );
+
+    assert_eq!(
+        process_incoming(ack.clone(), node.id, Arc::clone(&node.dedup)),
+        ProcessAction::DeliverLocal
+    );
+    // Acknowledging an acknowledgement would bounce between the two nodes.
+    assert_eq!(
+        process_incoming(ack, node.id, Arc::clone(&node.dedup)),
+        ProcessAction::Drop
+    );
+}
+
+#[test]
+fn a_duplicate_meant_for_someone_else_is_still_dropped() {
+    let node = Node::new(13);
+    let envelope = MessageEnvelope::new(
+        999,
+        424242,
+        b"not mine".to_vec(),
+        Priority::Direct,
+        PayloadType::Text,
+        INITIAL_TTL,
+    );
+    assert_eq!(
+        process_incoming(envelope.clone(), node.id, Arc::clone(&node.dedup)),
+        ProcessAction::Relay
+    );
+    assert_eq!(
+        process_incoming(envelope, node.id, Arc::clone(&node.dedup)),
+        ProcessAction::Drop
+    );
+}
+
+#[test]
+fn a_signed_envelope_verifies_against_its_sender_and_nobody_else() {
+    let alice = IdentityKeyPair::from_bytes(&[21u8; 32]).unwrap();
+    let mallory = IdentityKeyPair::from_bytes(&[22u8; 32]).unwrap();
+
+    let envelope = meshlink_core::sign_envelope(
+        MessageEnvelope::new(
+            beacon_id_from_public_key(&alice.public_key()),
+            777,
+            b"carry this for me".to_vec(),
+            Priority::Direct,
+            PayloadType::Text,
+            INITIAL_TTL,
+        ),
+        &alice,
+    );
+
+    assert!(meshlink_core::verify_envelope(envelope.clone(), alice.public_key()));
+    // Relays are asked to spend storage on this; it must not be attributable to
+    // anyone who did not actually send it.
+    assert!(!meshlink_core::verify_envelope(envelope, mallory.public_key()));
+}
+
+#[test]
+fn tampering_with_a_signed_envelope_is_detected() {
+    let alice = IdentityKeyPair::from_bytes(&[23u8; 32]).unwrap();
+    let signed = meshlink_core::sign_envelope(
+        MessageEnvelope::new(777, 888, b"original".to_vec(), Priority::Direct, PayloadType::Text, INITIAL_TTL),
+        &alice,
+    );
+
+    let mut altered = signed.clone();
+    altered.encrypted_payload = b"swapped".to_vec();
+    assert!(!meshlink_core::verify_envelope(altered, alice.public_key()));
+
+    let mut rerouted = signed.clone();
+    rerouted.recipient_id = 999;
+    assert!(!meshlink_core::verify_envelope(rerouted, alice.public_key()));
+
+    // A relay must still be able to decrement TTL without breaking the signature.
+    let mut forwarded = signed.clone();
+    assert!(forwarded.decrement_ttl());
+    assert!(meshlink_core::verify_envelope(forwarded, alice.public_key()));
+}
+
+#[test]
+fn an_acknowledgement_names_the_message_it_settles_in_the_clear() {
+    let alice = IdentityKeyPair::from_bytes(&[24u8; 32]).unwrap();
+    let ack = meshlink_core::create_ack_envelope(111, 222, b"sealed receipt".to_vec(), "msg-abc".into());
+
+    // A relay carrying msg-abc needs this without being able to open the payload.
+    assert_eq!(ack.ack_for.as_deref(), Some("msg-abc"));
+    assert_eq!(ack.payload_type, PayloadType::Ack);
+
+    // And it is covered by the signature, so a relay cannot be tricked into
+    // dropping a message that was never actually delivered.
+    let signed = meshlink_core::sign_envelope(ack, &alice);
+    let mut forged = signed.clone();
+    forged.ack_for = Some("msg-xyz".into());
+    assert!(meshlink_core::verify_envelope(signed, alice.public_key()));
+    assert!(!meshlink_core::verify_envelope(forged, alice.public_key()));
 }

@@ -47,6 +47,20 @@ interface MessageDao {
     """)
     suspend fun getPendingMessagesForPeer(peerId: Long): List<MessageEntity>
 
+    /**
+     * Outbound direct messages the recipient has not acknowledged yet.
+     *
+     * A message handed to a neighbour is not necessarily a message delivered:
+     * with flooding the neighbour may simply not be on a path to the recipient.
+     * These are the ones still owed an acknowledgement.
+     */
+    @Query("""
+        SELECT * FROM messages
+        WHERE direction = 'OUTBOUND' AND isBroadcast = 0 AND status != 'DELIVERED'
+        ORDER BY timestamp ASC
+    """)
+    suspend fun getUnacknowledgedMessages(): List<MessageEntity>
+
     // ── Conversation List (last message per peer) ──
 
     @Query("""

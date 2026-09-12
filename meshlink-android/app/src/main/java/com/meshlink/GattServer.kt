@@ -142,14 +142,21 @@ class GattServer(
             next
         } ?: return
 
-        val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gattServer?.notifyCharacteristicChanged(device, characteristic, true, chunk) ==
-                android.bluetooth.BluetoothStatusCodes.SUCCESS
-        } else {
-            @Suppress("DEPRECATION")
-            characteristic.value = chunk
-            @Suppress("DEPRECATION")
-            gattServer?.notifyCharacteristicChanged(device, characteristic, true) == true
+        // As in GattClient: a stack that rejects a frame by throwing must not be
+        // able to kill the service.
+        val ok = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gattServer?.notifyCharacteristicChanged(device, characteristic, true, chunk) ==
+                    android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value = chunk
+                @Suppress("DEPRECATION")
+                gattServer?.notifyCharacteristicChanged(device, characteristic, true) == true
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Indication to $address threw: ${e.message}")
+            false
         }
 
         if (!ok) {

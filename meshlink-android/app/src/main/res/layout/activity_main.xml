@@ -28,10 +28,11 @@
                 android:orientation="horizontal">
 
                 <View
+                    android:id="@+id/vStatusDot"
                     android:layout_width="8dp"
                     android:layout_height="8dp"
                     android:background="@drawable/bg_avatar"
-                    android:backgroundTint="#4DCA59" />
+                    android:backgroundTint="#8E9BA7" />
 
                 <TextView
                     android:id="@+id/tvStatus"
@@ -45,6 +46,43 @@
             
         </androidx.appcompat.widget.Toolbar>
     </com.google.android.material.appbar.AppBarLayout>
+
+    <!-- Shown whenever the Bluetooth radio is off. The whole row is tappable so
+         the user can get back to the enable prompt after dismissing it once. -->
+    <LinearLayout
+        android:id="@+id/bannerBluetooth"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#3A2A12"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="12dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tvBluetoothBanner"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Bluetooth is off. MeshLink cannot reach any nodes."
+            android:textColor="#FFD9A0"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/btnEnableBluetooth"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:text="TURN ON"
+            android:textColor="#FFB74D"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+    </LinearLayout>
 
     <FrameLayout
         android:layout_width="match_parent"

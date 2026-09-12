@@ -96,6 +96,54 @@ pub fn decrement_ttl(mut envelope: MessageEnvelope) -> Option<MessageEnvelope> {
     }
 }
 
+/// Builds an acknowledgement, carrying the acknowledged id in the clear so that
+/// relays holding a copy of that message can stop carrying it.
+#[uniffi::export]
+pub fn create_ack_envelope(
+    sender_id: u32,
+    recipient_id: u32,
+    payload: Vec<u8>,
+    ack_for: String,
+) -> MessageEnvelope {
+    let mut envelope = MessageEnvelope::new(
+        sender_id,
+        recipient_id,
+        payload,
+        Priority::Direct,
+        PayloadType::Ack,
+        envelope::INITIAL_TTL,
+    );
+    envelope.ack_for = Some(ack_for);
+    envelope
+}
+
+/// Signs an envelope with the sender's long-term identity key.
+///
+/// Signing matters most once nodes store messages for each other: without it any
+/// device in radio range could fill a relay's store with traffic attributed to
+/// someone else.
+#[uniffi::export]
+pub fn sign_envelope(
+    mut envelope: MessageEnvelope,
+    identity_key: &IdentityKeyPair,
+) -> MessageEnvelope {
+    envelope.signature = identity_key.sign(&envelope.serialize_for_signing());
+    envelope
+}
+
+/// Checks an envelope against the claimed sender's identity public key.
+#[uniffi::export]
+pub fn verify_envelope(envelope: MessageEnvelope, identity_public_key: Vec<u8>) -> bool {
+    if envelope.signature.is_empty() {
+        return false;
+    }
+    verify_signature(
+        &identity_public_key,
+        &envelope.serialize_for_signing(),
+        &envelope.signature,
+    )
+}
+
 #[uniffi::export]
 pub fn serialize_envelope(envelope: MessageEnvelope) -> Vec<u8> {
     envelope.serialize()

@@ -27,6 +27,14 @@ object LinkCodec {
     private const val ATT_OVERHEAD = 3
 
     /**
+     * Hard ceiling on a single ATT attribute value, independent of the MTU.
+     * A negotiated MTU of 517 allows 514 payload bytes, but the Bluetooth stack
+     * still rejects any attribute value over 512 with an IllegalArgumentException,
+     * so the frame size is the smaller of the two limits.
+     */
+    private const val MAX_ATTR_VALUE = 512
+
+    /**
      * How long a partially received message may sit without progress. Measured
      * between chunks rather than from the start, so a large but healthy transfer
      * is never cut off partway.
@@ -49,7 +57,8 @@ object LinkCodec {
         }
         val combined = nonce + ciphertext
 
-        val chunkSize = (mtu - ATT_OVERHEAD - HEADER_SIZE).coerceAtLeast(16)
+        val frameSize = minOf(mtu - ATT_OVERHEAD, MAX_ATTR_VALUE)
+        val chunkSize = (frameSize - HEADER_SIZE).coerceAtLeast(16)
         val total = (combined.size + chunkSize - 1) / chunkSize
         if (total > MAX_CHUNKS) {
             Log.e(TAG, "Message of ${combined.size}B needs $total chunks, over the $MAX_CHUNKS limit")

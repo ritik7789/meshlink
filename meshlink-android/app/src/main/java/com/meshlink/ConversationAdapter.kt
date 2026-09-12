@@ -113,7 +113,7 @@ class ConversationAdapter(
             val username = if (isBroadcastThread) {
                 "Broadcast"
             } else {
-                prefs.getString("peer_name_$peerId", null)?.takeIf { it.isNotBlank() }
+                prefs.getString(peerNameKeyForRow(peerId), null)?.takeIf { it.isNotBlank() }
                     ?: defaultNodeName(rowToBeaconId(peerId))
             }
 

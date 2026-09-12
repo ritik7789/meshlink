@@ -128,7 +128,7 @@ class ChatActivity : AppCompatActivity() {
         btnBack = findViewById(R.id.btnBack)
 
         val prefs = getSharedPreferences(RelayService.PREFS_NAME, MODE_PRIVATE)
-        tvPeerName.text = prefs.getString("peer_name_$peerBeaconId", null)?.takeIf { it.isNotBlank() }
+        tvPeerName.text = prefs.getString(peerNameKeyForRow(peerBeaconId), null)?.takeIf { it.isNotBlank() }
             ?: defaultNodeName(rowToBeaconId(peerBeaconId))
         tvBeaconId.text = "Beacon: $peerBeaconId"
 
