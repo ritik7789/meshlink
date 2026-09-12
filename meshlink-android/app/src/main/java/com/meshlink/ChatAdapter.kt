@@ -255,6 +255,14 @@ internal fun bindMessageBody(
     view.alpha = 1f
 
     when (message.messageType) {
+        MessageType.CALL -> {
+            // Deliberately quiet: a call log is a record of something that
+            // happened, not something anyone said, and it should not compete
+            // with the conversation around it.
+            view.text = message.plaintext
+            view.textSize = 14f
+            view.alpha = 0.75f
+        }
         MessageType.STICKER -> {
             view.text = Stickers.glyphFor(message.plaintext)
             view.textSize = 48f

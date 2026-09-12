@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0B141A"
+    android:orientation="vertical"
+    android:paddingStart="24dp"
+    android:paddingEnd="24dp">
+
+    <!-- Identity. Pushed down from the top rather than centred, so the controls
+         at the bottom stay within thumb reach on a tall phone. -->
+    <TextView
+        android:id="@+id/tvCallAvatar"
+        android:layout_width="112dp"
+        android:layout_height="112dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="96dp"
+        android:background="@drawable/bg_avatar"
+        android:gravity="center"
+        android:textColor="#FFFFFF"
+        android:textSize="44sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tvCallName"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:ellipsize="end"
+        android:gravity="center"
+        android:maxLines="1"
+        android:textColor="#E9EDEF"
+        android:textSize="26sp" />
+
+    <TextView
+        android:id="@+id/tvCallStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="center"
+        android:textColor="#8696A0"
+        android:textSize="16sp" />
+
+    <TextView
+        android:id="@+id/tvCallHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:gravity="center"
+        android:lineSpacingExtra="3dp"
+        android:textColor="#5F7883"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <!-- Every control on one row, all the same size.
+         Mute and speaker used to sit in a smaller row above the end button,
+         which read as two unrelated groups rather than one set of call
+         controls. The cells are a fixed width and the row is centred, so
+         whichever subset a phase shows stays evenly spaced and on the same
+         grid instead of shifting as buttons appear. -->
+    <LinearLayout
+        android:id="@+id/callRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="64dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:id="@+id/cellMute"
+            style="@style/CallControlCell">
+
+            <ImageButton
+                android:id="@+id/btnMute"
+                style="@style/CallControlButton"
+                android:background="@drawable/bg_call_control"
+                android:contentDescription="Mute"
+                android:src="@drawable/ic_mic_on" />
+
+            <TextView
+                android:id="@+id/tvMuteLabel"
+                style="@style/CallControlLabel"
+                android:text="Mute" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/cellSpeaker"
+            style="@style/CallControlCell">
+
+            <ImageButton
+                android:id="@+id/btnSpeaker"
+                style="@style/CallControlButton"
+                android:background="@drawable/bg_call_control"
+                android:contentDescription="Speaker"
+                android:src="@drawable/ic_speaker" />
+
+            <TextView
+                android:id="@+id/tvSpeakerLabel"
+                style="@style/CallControlLabel"
+                android:text="Speaker" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/cellEnd"
+            style="@style/CallControlCell">
+
+            <ImageButton
+                android:id="@+id/btnDecline"
+                style="@style/CallControlButton"
+                android:background="@drawable/bg_call_end"
+                android:contentDescription="End call"
+                android:src="@drawable/ic_call_end" />
+
+            <TextView
+                android:id="@+id/tvDeclineLabel"
+                style="@style/CallControlLabel"
+                android:text="End" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/cellAnswer"
+            style="@style/CallControlCell">
+
+            <ImageButton
+                android:id="@+id/btnAnswer"
+                style="@style/CallControlButton"
+                android:background="@drawable/bg_call_answer"
+                android:contentDescription="Answer"
+                android:src="@drawable/ic_call" />
+
+            <TextView
+                style="@style/CallControlLabel"
+                android:text="Answer" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

@@ -7,17 +7,16 @@ import android.view.ViewGroup
 import android.widget.ImageButton
 
 /**
- * The single door to everything voice-calling.
+ * The screen's door into calling: the button, and the microphone behind it.
  *
- * Every entry point the feature needs — a button in the chat header, inbound
- * signalling, the audio transport, teardown — passes through here, so disabling
- * it is one line in [Features] rather than an audit of the codebase. Each method
- * checks the flag itself and does nothing when off, which means callers never
- * need a guard of their own and cannot forget one.
+ * This is the half of the feature that belongs to an activity — putting a call
+ * action in a chat header, asking for the microphone at the moment it is first
+ * needed, and handling the answer. The call itself lives in [CallSession] inside
+ * the relay service, because it has to outlive any screen.
  *
- * The methods are stubs today. They exist first on purpose: the implementation
- * lands inside an already-guarded shape, rather than being retro-fitted with a
- * switch afterwards and missing a path.
+ * Every method checks [Features.VOICE_CALLS] itself, so callers never need a
+ * guard of their own and cannot forget one. With the flag off this object adds
+ * no view, attaches no listener and asks for nothing.
  */
 object CallFeature {
 
@@ -81,21 +80,23 @@ object CallFeature {
     }
 
     /**
-     * The point a real call would start. Today it only reports that it cannot.
+     * Hands the dial off to the relay service, which owns the call.
      *
-     * Deliberately *not* calling [setCallActive]: that suspends scanning and
-     * presence for the duration of a call, and a stub call has no duration —
-     * nothing ever ends it, so the mesh would stop discovering peers from the
-     * first tap of the button until the service was restarted. The
-     * prioritisation path stays wired up and tested; it is simply not claimed
-     * by a call that does not exist yet.
+     * The session deliberately does not live here: a call has to survive the
+     * chat screen being closed, the phone being locked and the app being
+     * switched away from, and only the foreground service outlives all three.
+     * This object's job ends at asking.
      */
     private fun beginCall(activity: Activity, peerBeaconId: Int) {
         if (!Features.VOICE_CALLS) return
-        Log.i(TAG, "Call requested to $peerBeaconId (not implemented)")
-        android.widget.Toast.makeText(
-            activity, "Calling isn't available yet", android.widget.Toast.LENGTH_SHORT
-        ).show()
+
+        activity.startService(
+            android.content.Intent(activity, RelayService::class.java).apply {
+                action = RelayService.ACTION_CALL_DIAL
+                putExtra(RelayService.EXTRA_BEACON_ID, peerBeaconId)
+            }
+        )
+        Log.i(TAG, "Dial requested to $peerBeaconId")
     }
 
     fun hasMicrophonePermission(context: android.content.Context): Boolean {
@@ -194,73 +195,6 @@ object CallFeature {
             }
             .setNegativeButton("Not now", null)
             .show()
-    }
-
-    /**
-     * Tells the relay service a call is starting or finishing.
-     *
-     * While one is live the service stops the periodic work that interrupts the
-     * radio — the scan cycle above all, whose one-second gap every fifteen
-     * seconds is an audible dropout — and asks for a faster connection interval
-     * on the link carrying the audio.
-     */
-    fun setCallActive(context: android.content.Context, active: Boolean, peerBeaconId: Int) {
-        if (!Features.VOICE_CALLS) return
-        context.startService(
-            android.content.Intent(context, RelayService::class.java).apply {
-                action = RelayService.ACTION_CALL_STATE
-                putExtra(RelayService.EXTRA_CALL_ACTIVE, active)
-                putExtra(RelayService.EXTRA_BEACON_ID, peerBeaconId)
-            }
-        )
-    }
-
-    /**
-     * Offers an inbound envelope to the call layer.
-     *
-     * Returns true when the payload belonged to calling and has been consumed,
-     * so the caller should stop processing it. Always false when disabled, which
-     * makes call traffic from a node that does have the feature fall through to
-     * the normal path and be discarded as an unrecognised payload.
-     *
-     * [isSenderBlocked] is supplied by the caller because the block list lives
-     * with the relay service. A blocked node must not be able to make the phone
-     * ring, and a call arrives ahead of the text path's own block check, so this
-     * has to be consulted here rather than relied upon downstream.
-     */
-    fun handleIncomingPayload(
-        envelope: uniffi.meshlink_core.MessageEnvelope,
-        isSenderBlocked: (Int) -> Boolean
-    ): Boolean {
-        if (!Features.VOICE_CALLS) return false
-
-        val sender = envelope.senderId.toInt()
-        if (isSenderBlocked(sender)) {
-            // Swallowed rather than passed on: nothing rings, and it does not
-            // fall through to be logged as unrecognised traffic either.
-            Log.i(TAG, "Ignoring call payload from blocked node $sender")
-            return true
-        }
-        return false
-    }
-
-    /**
-     * Registers the real-time audio characteristic on the GATT server.
-     *
-     * Voice needs its own unreliable channel: the message characteristic
-     * retries and reassembles, and for audio a late frame is worse than a lost
-     * one. Nothing is added when the feature is off, so a disabled build does
-     * not advertise a channel it will never serve.
-     */
-    fun registerTransport(service: android.bluetooth.BluetoothGattService) {
-        if (!Features.VOICE_CALLS) return
-    }
-
-    /** Tears down any active call, e.g. when the radio goes away. */
-    fun endAllCalls(context: android.content.Context, reason: String) {
-        if (!Features.VOICE_CALLS) return
-        Log.i(TAG, "Ending calls: $reason")
-        setCallActive(context, false, 0)
     }
 
     private fun dp(activity: Activity, value: Int): Int =

@@ -22,6 +22,9 @@ interface GattServerListener {
     fun onPeerDisconnected(device: BluetoothDevice)
     fun onBeaconIdReceived(device: BluetoothDevice, beaconId: Int, sharedSecret: ByteArray)
     fun onMessageReceived(device: BluetoothDevice, data: ByteArray)
+
+    /** One voice packet, already opened. Called on a Bluetooth thread. */
+    fun onAudioReceived(device: BluetoothDevice, packet: ByteArray)
 }
 
 /**
@@ -46,6 +49,19 @@ class GattServer(
         val BEACON_CHAR_UUID: UUID = UUID.fromString("00001002-0000-1000-8000-00805F9B34FB")
         val MESSAGE_CHAR_UUID: UUID = UUID.fromString("00001003-0000-1000-8000-00805F9B34FB")
 
+        /**
+         * Voice packets, kept off [MESSAGE_CHAR_UUID] on purpose.
+         *
+         * The message characteristic indicates, which means one packet in
+         * flight at a time and a retry for anything unconfirmed. That is right
+         * for a message and ruinous for a call: a single retransmission stalls
+         * the whole stream behind it, and by the time a late voice packet
+         * arrives the moment it belonged to has passed. This one notifies
+         * without confirmation and is written without response - lossy by
+         * design, because for audio a missing frame costs less than a late one.
+         */
+        val AUDIO_CHAR_UUID: UUID = UUID.fromString("00001004-0000-1000-8000-00805F9B34FB")
+
         /** Standard Client Characteristic Configuration descriptor. */
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
@@ -57,9 +73,11 @@ class GattServer(
 
     private var gattServer: BluetoothGattServer? = null
     private var messageCharacteristic: BluetoothGattCharacteristic? = null
+    private var audioCharacteristic: BluetoothGattCharacteristic? = null
 
     private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
     private val subscribedDevices = ConcurrentHashMap<String, Boolean>()
+    private val audioSubscribers = ConcurrentHashMap<String, Boolean>()
     private val sharedSecrets = ConcurrentHashMap<String, ByteArray>()
     private val serverPayloads = ConcurrentHashMap<String, ByteArray>()
     private val mtus = ConcurrentHashMap<String, Int>()
@@ -83,6 +101,7 @@ class GattServer(
         gattServer = null
         connectedDevices.clear()
         subscribedDevices.clear()
+        audioSubscribers.clear()
         sharedSecrets.clear()
         notifyQueues.clear()
         notifyInProgress.clear()
@@ -113,6 +132,46 @@ class GattServer(
         synchronized(queue) { queue.addAll(chunks) }
         pumpNotifications(address)
         return true
+    }
+
+    /** True when this peer has subscribed for voice packets over notifications. */
+    fun canSendAudioTo(address: String): Boolean =
+        connectedDevices.containsKey(address) &&
+            audioSubscribers[address] == true &&
+            sharedSecrets.containsKey(address)
+
+    /**
+     * Pushes one voice packet, dropping it rather than queueing on congestion.
+     *
+     * Deliberately bypasses the indication queue [sendToDevice] uses. There is
+     * no retry and no ordering guarantee beyond what the link itself provides,
+     * because a queue here would fill with packets whose moment had passed and
+     * then deliver them all late. When the stack says it is busy, the right
+     * answer for audio is to throw the packet away and send the next one.
+     */
+    @SuppressLint("MissingPermission")
+    fun sendAudio(address: String, packet: ByteArray): Boolean {
+        val characteristic = audioCharacteristic ?: return false
+        val device = connectedDevices[address] ?: return false
+        val secret = sharedSecrets[address] ?: return false
+        if (audioSubscribers[address] != true) return false
+
+        val sealed = LinkCodec.sealPacket(secret, packet, mtus[address] ?: DEFAULT_MTU)
+        if (sealed.isEmpty()) return false
+
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gattServer?.notifyCharacteristicChanged(device, characteristic, false, sealed) ==
+                    android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value = sealed
+                @Suppress("DEPRECATION")
+                gattServer?.notifyCharacteristicChanged(device, characteristic, false) == true
+            }
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /**
@@ -209,13 +268,31 @@ class GattServer(
         )
         messageCharacteristic = messageChar
 
-        // Voice needs its own unreliable channel rather than sharing the
-        // message characteristic, which retries and reassembles.
-        CallFeature.registerTransport(service)
-
         service.addCharacteristic(versionChar)
         service.addCharacteristic(beaconChar)
         service.addCharacteristic(messageChar)
+
+        // Voice needs its own unreliable channel rather than sharing the
+        // message characteristic, which retries and reassembles. Nothing is
+        // added when calling is disabled, so a build without the feature does
+        // not advertise a channel it will never serve.
+        if (CallFeature.isEnabled) {
+            val audioChar = BluetoothGattCharacteristic(
+                AUDIO_CHAR_UUID,
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
+                    BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PERMISSION_WRITE
+            )
+            audioChar.addDescriptor(
+                BluetoothGattDescriptor(
+                    CCCD_UUID,
+                    BluetoothGattDescriptor.PERMISSION_READ or
+                        BluetoothGattDescriptor.PERMISSION_WRITE
+                )
+            )
+            audioCharacteristic = audioChar
+            service.addCharacteristic(audioChar)
+        }
 
         gattServer?.addService(service)
     }
@@ -261,8 +338,14 @@ class GattServer(
         ) {
             if (descriptor.uuid == CCCD_UUID) {
                 val enabled = value != null && value.isNotEmpty() && value[0].toInt() != 0
-                subscribedDevices[device.address] = enabled
-                Log.d(TAG, "${device.address} ${if (enabled) "subscribed to" else "unsubscribed from"} indications")
+                // Two characteristics notify now, so the subscription has to be
+                // recorded against the right one: a peer that has subscribed for
+                // audio has not thereby said it can receive messages.
+                when (descriptor.characteristic?.uuid) {
+                    AUDIO_CHAR_UUID -> audioSubscribers[device.address] = enabled
+                    else -> subscribedDevices[device.address] = enabled
+                }
+                Log.d(TAG, "${device.address} ${if (enabled) "subscribed to" else "unsubscribed from"} ${descriptor.characteristic?.uuid}")
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
@@ -338,6 +421,14 @@ class GattServer(
                     } catch (e: Exception) {
                         Log.e(TAG, "Error handling client handshake: ${e.message}")
                     }
+                    if (responseNeeded) {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                    }
+                }
+                AUDIO_CHAR_UUID -> {
+                    LinkCodec.openPacket(sharedSecrets[device.address], value)
+                        ?.let { listener.onAudioReceived(device, it) }
+                    // Written without response, so there is nothing to answer.
                     if (responseNeeded) {
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                     }

@@ -10,6 +10,9 @@ object MessageType {
     const val CONTACT = "CONTACT"
     const val IMAGE = "IMAGE"
     const val FILE = "FILE"
+
+    /** A call that happened, rather than anything anyone said. */
+    const val CALL = "CALL"
 }
 
 /** Lifecycle of an attachment's bytes, independent of message delivery. */
@@ -43,7 +46,7 @@ data class MessageEntity(
     val isRead: Boolean = false,
 
     /**
-     * What this message carries: TEXT, STICKER, CONTACT, IMAGE or FILE.
+     * What this message carries: TEXT, STICKER, CONTACT, IMAGE, FILE or CALL.
      *
      * Every kind is one row, which is what keeps the unread badge honest: a
      * photo or a contact card counts as exactly one unseen message, the same as

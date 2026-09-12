@@ -524,6 +524,13 @@ fn every_payload_type_survives_a_round_trip() {
         PayloadType::StickerRef,
         PayloadType::Sos,
         PayloadType::Presence,
+        PayloadType::TopologyHint,
+        PayloadType::GroupInvite,
+        PayloadType::GroupMessage,
+        PayloadType::CallInvite,
+        PayloadType::CallAccept,
+        PayloadType::CallDecline,
+        PayloadType::CallEnd,
     ] {
         let mut envelope = MessageEnvelope::new(
             1, 2, b"payload".to_vec(), Priority::Direct, payload_type.clone(), INITIAL_TTL,
@@ -544,4 +551,50 @@ fn only_media_chunks_count_as_bulk() {
     assert!(!PayloadType::ContactCard.is_bulk());
     assert!(!PayloadType::StickerRef.is_bulk());
     assert!(!PayloadType::Text.is_bulk());
+}
+
+/// The wire value of every payload type, pinned.
+///
+/// postcard encodes an enum as its positional discriminant, so inserting a
+/// variant anywhere but the end silently renumbers everything after it and an
+/// older node reads a message as a *different* type rather than rejecting it.
+/// That is not theoretical: a group invite once arrived as a chat bubble with
+/// the group key printed in it, because two variants had been inserted in the
+/// middle.
+///
+/// A comment did not stop that happening. This does: adding a variant anywhere
+/// but the end fails here, and the failure names the position that moved.
+#[test]
+fn payload_type_wire_values_never_move() {
+    let expected: [(PayloadType, u8); 17] = [
+        (PayloadType::Text, 0),
+        (PayloadType::Ack, 1),
+        (PayloadType::MediaOffer, 2),
+        (PayloadType::MediaRequest, 3),
+        (PayloadType::MediaChunk, 4),
+        (PayloadType::MediaComplete, 5),
+        (PayloadType::ContactCard, 6),
+        (PayloadType::StickerRef, 7),
+        (PayloadType::Sos, 8),
+        (PayloadType::Presence, 9),
+        (PayloadType::TopologyHint, 10),
+        (PayloadType::GroupInvite, 11),
+        (PayloadType::GroupMessage, 12),
+        (PayloadType::CallInvite, 13),
+        (PayloadType::CallAccept, 14),
+        (PayloadType::CallDecline, 15),
+        (PayloadType::CallEnd, 16),
+    ];
+
+    for (payload_type, wire_value) in expected {
+        let encoded = postcard::to_allocvec(&payload_type).expect("encodes");
+        assert_eq!(
+            encoded,
+            vec![wire_value],
+            "{:?} must stay at wire value {}: a node running an older build \
+             will read anything else as a different payload type entirely",
+            payload_type,
+            wire_value
+        );
+    }
 }

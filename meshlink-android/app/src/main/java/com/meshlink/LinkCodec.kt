@@ -90,6 +90,45 @@ object LinkCodec {
      * single dropped chunk left stale bytes that corrupted every later message
      * from that peer. This tracks the expected index and resets on any gap.
      */
+    /**
+     * Seals one packet that must travel whole, with no chunk header.
+     *
+     * Audio uses this instead of [frame]: a voice packet is already small
+     * enough for any negotiated MTU, and the chunking header exists to let a
+     * large message span several radio packets — a guarantee audio explicitly
+     * does not want, since half a frame arriving is the same as none arriving
+     * and waiting for the other half only adds delay. Returns an empty array if
+     * the packet would not fit, so the caller drops it rather than sending
+     * something the far side will reject.
+     */
+    fun sealPacket(secret: ByteArray, plaintext: ByteArray, mtu: Int): ByteArray {
+        val nonce = ByteArray(12)
+        SecureRandom().nextBytes(nonce)
+        val ciphertext = uniffi.meshlink_core.encryptTransport(secret, nonce, plaintext)
+        if (ciphertext.isEmpty()) return ByteArray(0)
+
+        val sealed = nonce + ciphertext
+        val limit = minOf(mtu - ATT_OVERHEAD, MAX_ATTR_VALUE)
+        if (sealed.size > limit) {
+            Log.w(TAG, "Packet of ${sealed.size}B exceeds the ${limit}B link limit; dropping")
+            return ByteArray(0)
+        }
+        return sealed
+    }
+
+    /** Opens a packet sealed by [sealPacket]. Null when it cannot be trusted. */
+    fun openPacket(secret: ByteArray?, sealed: ByteArray): ByteArray? {
+        if (secret == null || sealed.size <= 12) return null
+        return try {
+            uniffi.meshlink_core.decryptTransport(
+                secret, sealed.copyOfRange(0, 12), sealed.copyOfRange(12, sealed.size)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Packet failed to open: ${e.message}")
+            null
+        }
+    }
+
     class Reassembler {
         private class Partial(var buffer: ByteArray, var nextIndex: Int, var total: Int, var lastChunkAt: Long)
 

@@ -53,6 +53,20 @@ pub enum PayloadType {
     /// same airtime whether the group has three members or twenty-five, and
     /// nodes outside the group cannot open any of it.
     GroupMessage,
+    /// Ringing a direct neighbour: carries the call id and the codec the caller
+    /// will send. Never relayed - a call the mesh has to carry is a call whose
+    /// audio the mesh cannot carry, so there is no point ringing.
+    CallInvite,
+    /// Callee picking up. Audio starts flowing on the dedicated characteristic
+    /// the moment this is sent, in both directions.
+    CallAccept,
+    /// Callee refusing, or unable to take it: the reason distinguishes a person
+    /// saying no from a node that is already on another call.
+    CallDecline,
+    /// Either side hanging up, and also what a ring that nobody answered
+    /// eventually sends, so the far end stops ringing rather than timing out
+    /// on its own clock.
+    CallEnd,
 }
 
 // NOTE: new variants must be appended here, never inserted. The encoding is

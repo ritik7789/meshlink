@@ -16,6 +16,9 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Lets an incoming call reach the screen while the phone is locked or
+         another app is in front. Without it the ring is only a notification. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- Required for foreground service and notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -42,6 +45,17 @@
         
         <activity android:name=".ChatActivity" />
         <activity android:name=".GroupInfoActivity" />
+
+        <!-- singleTask so a second call reuses the screen instead of stacking
+             another behind it; excluded from recents because a finished call is
+             not somewhere to navigate back to. -->
+        <activity
+            android:name=".CallActivity"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:showOnLockScreen="true"
+            android:taskAffinity=".call"
+            android:theme="@style/Theme.MeshLink" />
         
         <!-- Foreground service for background relay (NFR-3.1.2) -->
         <service android:name=".RelayService" android:foregroundServiceType="connectedDevice|location|microphone" />

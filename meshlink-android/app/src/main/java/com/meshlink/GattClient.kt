@@ -18,6 +18,9 @@ interface GattClientListener {
     fun onPeerDisconnected(device: BluetoothDevice)
     fun onMessageReceived(device: BluetoothDevice, data: ByteArray)
     fun onHandshakeFailed(device: BluetoothDevice, reason: String)
+
+    /** One voice packet, already opened. Called on a Bluetooth thread. */
+    fun onAudioReceived(device: BluetoothDevice, packet: ByteArray)
 }
 
 /**
@@ -268,6 +271,76 @@ class GattClient(
     }
 
     /**
+     * Subscribes to voice packets. Returns false when there is nothing to
+     * subscribe to, which is the normal case against a peer whose build has
+     * calling disabled — the characteristic simply is not in its service.
+     */
+    @SuppressLint("MissingPermission")
+    private fun enableAudioNotifications(gatt: BluetoothGatt): Boolean {
+        val characteristic = gatt
+            .getService(RelayService.MESHLINK_SERVICE_UUID.uuid)
+            ?.getCharacteristic(GattServer.AUDIO_CHAR_UUID) ?: return false
+        val cccd = characteristic.getDescriptor(GattServer.CCCD_UUID) ?: return false
+
+        gatt.setCharacteristicNotification(characteristic, true)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                android.bluetooth.BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            run {
+                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                gatt.writeDescriptor(cccd)
+            }
+        }
+    }
+
+    /**
+     * Writes one voice packet without waiting for a response.
+     *
+     * Unlike [sendMessage] there is no queue and no retry: the packet either
+     * goes out now or is discarded. See GattServer.sendAudio for why that is
+     * the right trade for audio and the wrong one for everything else.
+     */
+    @SuppressLint("MissingPermission")
+    fun sendAudio(deviceAddress: String, packet: ByteArray): Boolean {
+        val gatt = connections[deviceAddress] ?: return false
+        val secret = sharedSecrets[deviceAddress] ?: return false
+        val characteristic = gatt
+            .getService(RelayService.MESHLINK_SERVICE_UUID.uuid)
+            ?.getCharacteristic(GattServer.AUDIO_CHAR_UUID) ?: return false
+
+        val sealed = LinkCodec.sealPacket(secret, packet, mtus[deviceAddress] ?: DEFAULT_MTU)
+        if (sealed.isEmpty()) return false
+
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(
+                    characteristic, sealed,
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                ) == android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    characteristic.writeType =
+                        BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    characteristic.value = sealed
+                    gatt.writeCharacteristic(characteristic)
+                }
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** True when voice packets can be written to this peer right now. */
+    fun canSendAudioTo(address: String): Boolean =
+        connections[address]
+            ?.getService(RelayService.MESHLINK_SERVICE_UUID.uuid)
+            ?.getCharacteristic(GattServer.AUDIO_CHAR_UUID) != null &&
+            sharedSecrets.containsKey(address)
+
+    /**
      * Reports a completed handshake exactly once per link. Removing the pending
      * beacon id is what makes repeat calls — the subscribe callback and its
      * timeout fallback — harmless.
@@ -429,12 +502,24 @@ class GattClient(
         override fun onDescriptorWrite(
             gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int
         ) {
-            if (descriptor.uuid == GattServer.CCCD_UUID) {
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    Log.w(TAG, "Indication subscribe failed for ${gatt.device.address} ($status)")
-                }
-                announceHandshake(gatt)
+            if (descriptor.uuid != GattServer.CCCD_UUID) return
+
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "Subscribe to ${descriptor.characteristic?.uuid} failed for ${gatt.device.address} ($status)")
             }
+
+            // One descriptor write may be outstanding per connection, so the
+            // audio subscription has to wait for the message one to land rather
+            // than being issued alongside it - the second would simply be
+            // dropped, and the link would come up able to send voice but not
+            // receive any.
+            if (descriptor.characteristic?.uuid == GattServer.MESSAGE_CHAR_UUID &&
+                CallFeature.isEnabled &&
+                enableAudioNotifications(gatt)
+            ) {
+                return
+            }
+            announceHandshake(gatt)
         }
 
         @SuppressLint("MissingPermission")
@@ -478,6 +563,11 @@ class GattClient(
         private fun handleIndication(
             gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray
         ) {
+            if (characteristic.uuid == GattServer.AUDIO_CHAR_UUID) {
+                LinkCodec.openPacket(sharedSecrets[gatt.device.address], value)
+                    ?.let { listener.onAudioReceived(gatt.device, it) }
+                return
+            }
             if (characteristic.uuid != GattServer.MESSAGE_CHAR_UUID) return
             // Indications arrive chunked and link-encrypted exactly like writes,
             // so they need the same reassembly rather than being handed straight

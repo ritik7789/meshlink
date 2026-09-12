@@ -21,6 +21,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -66,6 +67,10 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         const val CHANNEL_ID = "MeshLinkRelayChannel"
         const val MESSAGE_CHANNEL_ID = "MeshLinkMessages"
 
+        /** Its own channel so a call rings even when messages are silenced. */
+        const val CALL_CHANNEL_ID = "MeshLinkCalls"
+        const val CALL_NOTIFICATION_ID = 1002
+
         val MESHLINK_SERVICE_UUID: ParcelUuid =
             ParcelUuid(UUID.fromString("0000FE22-0000-1000-8000-00805F9B34FB"))
 
@@ -89,8 +94,15 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         const val ACTION_BLOCKLIST_CHANGED = "BLOCKLIST_CHANGED"
 
         /** Raised and lowered around a live call, to give it the radio. */
-        const val ACTION_CALL_STATE = "CALL_STATE"
-        const val EXTRA_CALL_ACTIVE = "extra_call_active"
+        /** Commands from the call screen. */
+        const val ACTION_CALL_SYNC = "CALL_SYNC"
+        const val ACTION_CALL_DIAL = "CALL_DIAL"
+        const val ACTION_CALL_ACCEPT = "CALL_ACCEPT"
+        const val ACTION_CALL_DECLINE = "CALL_DECLINE"
+        const val ACTION_CALL_HANGUP = "CALL_HANGUP"
+        const val ACTION_CALL_MUTE = "CALL_MUTE"
+        const val ACTION_CALL_SPEAKER = "CALL_SPEAKER"
+        const val EXTRA_CALL_ON = "extra_call_on"
 
         /** Start offering a local file to a peer. */
         const val ACTION_SEND_MEDIA = "SEND_MEDIA"
@@ -143,6 +155,14 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             uniffi.meshlink_core.PayloadType.CONTACT_CARD,
             uniffi.meshlink_core.PayloadType.STICKER_REF,
             uniffi.meshlink_core.PayloadType.SOS
+        )
+
+        /** Payload types that ring a phone rather than say anything. */
+        private val CALL_PAYLOAD_TYPES = setOf(
+            uniffi.meshlink_core.PayloadType.CALL_INVITE,
+            uniffi.meshlink_core.PayloadType.CALL_ACCEPT,
+            uniffi.meshlink_core.PayloadType.CALL_DECLINE,
+            uniffi.meshlink_core.PayloadType.CALL_END
         )
 
         /** Payload types belonging to the media handshake rather than conversation. */
@@ -400,9 +420,46 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
     private fun isBlocked(beaconId: Int): Boolean = blockedNodes.contains(beaconId)
 
+    /**
+     * Mute and routing live here, not in the call screen.
+     *
+     * Both can be changed from the notification shade while no screen exists,
+     * so the service has to be the one that remembers; the screen renders what
+     * it is told rather than tracking its own copy, which is what keeps the two
+     * from disagreeing after a toggle from the other one.
+     */
+    @Volatile
+    private var callMuted = false
+
+    @Volatile
+    private var callSpeaker = false
+
+    /** Last phase acted on, so a re-broadcast does not repeat its side effects. */
+    private var lastCallPhase: CallSession.Phase? = null
+
     /** True while a call holds the radio; consulted before any bulk transfer. */
     @Volatile
     private var callInProgress = false
+
+    /**
+     * The one call this node can be on, created only when calling is compiled in.
+     *
+     * Everything it needs from the service is passed as a function rather than
+     * handing it the service itself, so the session cannot reach into the mesh
+     * and the compiler shows exactly what a call is allowed to touch.
+     */
+    private val callSession: CallSession? by lazy {
+        if (!Features.VOICE_CALLS) null
+        else CallSession(
+            context = this,
+            localBeaconId = { localBeaconId },
+            sendSignal = ::sendCallSignal,
+            sendAudioPacket = ::sendAudioTo,
+            isDirectNeighbour = ::isDirectNeighbour,
+            prepareAudio = { enterForeground(withMicrophone = true) },
+            onStateChanged = ::onCallStateChanged
+        )
+    }
 
     /**
      * Gives a live call priority over the mesh's routine work.
@@ -442,6 +499,336 @@ class RelayService : Service(), GattServerListener, GattClientListener {
                 handler.postDelayed(maintenanceRunnable, MAINTENANCE_INTERVAL_MS)
             }
             Log.i(TAG, "Call ended: mesh housekeeping resumed")
+        }
+    }
+
+    // ── Calling ──────────────────────────────────────────────────────────────
+
+    /**
+     * Sends one signalling message over a direct link only.
+     *
+     * Unlike [sendControl] this never floods. A call whose ringing has to be
+     * relayed is a call whose audio cannot be, so flooding the invite would only
+     * spend other nodes' airtime advertising something that can never connect.
+     */
+    private fun sendCallSignal(
+        beaconId: Int,
+        payload: String,
+        payloadType: uniffi.meshlink_core.PayloadType
+    ): Boolean {
+        val key = peerManager.staticKeyFor(beaconId) ?: return false
+        val sealed = staticKeys.seal(key, payload.toByteArray())
+        if (sealed.isEmpty()) return false
+
+        val envelope = signed(
+            uniffi.meshlink_core.createEnvelope(
+                senderId = localBeaconId.toUInt(),
+                recipientId = beaconId.toUInt(),
+                payload = sealed,
+                priority = uniffi.meshlink_core.Priority.DIRECT,
+                payloadType = payloadType
+            )
+        )
+        rememberOwnMessage(envelope.messageId)
+        return sendDirect(beaconId, envelope)
+    }
+
+    /** Pushes one voice packet over whichever GATT direction this peer offers. */
+    private fun sendAudioTo(beaconId: Int, packet: ByteArray): Boolean =
+        peerAddresses(beaconId).any { address ->
+            gattClient.sendAudio(address, packet) || gattServer.sendAudio(address, packet)
+        }
+
+    /** Voice packets arrive here from both GATT roles. */
+    override fun onAudioReceived(device: BluetoothDevice, packet: ByteArray) {
+        val beaconId = peerManager.getConnectedPeers()
+            .firstOrNull { it.address == device.address }?.beaconId ?: return
+        if (isBlocked(beaconId)) return
+        callSession?.onAudioPacket(beaconId, packet)
+    }
+
+    private fun handleCallSignal(envelope: uniffi.meshlink_core.MessageEnvelope) {
+        val session = callSession ?: return
+        val senderId = envelope.senderId.toInt()
+
+        // A blocked node must not be able to make the phone ring. Checked before
+        // the payload is even opened, and answered with nothing at all: a
+        // decline would confirm this node is here and listening.
+        if (isBlocked(senderId)) {
+            Log.i(TAG, "Ignoring call signalling from blocked node $senderId")
+            return
+        }
+
+        val body = openPayload(envelope) ?: return
+        when (envelope.payloadType) {
+            uniffi.meshlink_core.PayloadType.CALL_INVITE ->
+                CallProtocol.Invite.decode(body)?.let { session.onInvite(senderId, it) }
+            uniffi.meshlink_core.PayloadType.CALL_ACCEPT ->
+                CallProtocol.Accept.decode(body)?.let { session.onAccept(senderId, it) }
+            uniffi.meshlink_core.PayloadType.CALL_DECLINE ->
+                CallProtocol.Decline.decode(body)?.let { session.onDecline(senderId, it) }
+            uniffi.meshlink_core.PayloadType.CALL_END ->
+                CallProtocol.End.decode(body)?.let { session.onEnd(senderId, it) }
+            else -> Unit
+        }
+    }
+
+    private fun dialCall(beaconId: Int) {
+        val session = callSession ?: return
+        if (beaconId == 0) return
+
+        when (val result = session.dial(beaconId)) {
+            is CallSession.DialResult.Ringing -> Unit
+            is CallSession.DialResult.AlreadyOnACall -> announceCallProblem("Already on a call")
+            is CallSession.DialResult.NotDirectlyReachable -> announceCallProblem(
+                "${displayNameFor(beaconId)} is too far for a call — messages still get through"
+            )
+            is CallSession.DialResult.Failed -> announceCallProblem(result.message)
+        }
+    }
+
+    /** Tells whatever screen is open that a call could not start, and why. */
+    private fun announceCallProblem(message: String) {
+        sendBroadcast(
+            Intent(CallSession.ACTION_CALL_STATE).apply {
+                putExtra(CallSession.EXTRA_PHASE, CallSession.Phase.IDLE.name)
+                putExtra(CallSession.EXTRA_REASON, message)
+                setPackage(packageName)
+            }
+        )
+    }
+
+    /**
+     * Reacts to every change in the call's state: the radio, the screen and the
+     * notification all follow from here rather than from the session, which
+     * knows nothing about Android.
+     */
+    private fun onCallStateChanged(state: CallSession.State) {
+        // Mute and routing re-enter this with the phase unchanged, so anything
+        // that interrupts the user has to fire on a transition only. Without
+        // this, muting from the notification shade re-opened the call screen
+        // over whatever they had switched to.
+        val entered = state.phase != lastCallPhase
+        lastCallPhase = state.phase
+
+        setCallPriority(
+            active = state.phase == CallSession.Phase.ACTIVE,
+            peerBeaconId = state.peerBeaconId
+        )
+
+        sendBroadcast(
+            Intent(CallSession.ACTION_CALL_STATE).apply {
+                putExtra(CallSession.EXTRA_PHASE, state.phase.name)
+                putExtra(CallSession.EXTRA_PEER, beaconIdToRow(state.peerBeaconId))
+                putExtra(CallSession.EXTRA_PEER_NAME, displayNameFor(state.peerBeaconId))
+                putExtra(CallSession.EXTRA_CALL_ID, state.callId)
+                putExtra(CallSession.EXTRA_INCOMING, state.incoming)
+                putExtra(CallSession.EXTRA_STARTED_AT, state.startedAt)
+                putExtra(CallSession.EXTRA_MUTED, callMuted)
+                putExtra(CallSession.EXTRA_SPEAKER, callSpeaker)
+                state.reason?.let { putExtra(CallSession.EXTRA_REASON, it.name) }
+                setPackage(packageName)
+            }
+        )
+
+        when (state.phase) {
+            CallSession.Phase.RINGING -> if (entered) ringForIncomingCall(state)
+            CallSession.Phase.ACTIVE -> {
+                // Replaces the ring banner rather than sitting beside it: same
+                // notification id, so the Answer and Decline buttons are gone
+                // the moment there is a call to control instead of one to pick
+                // up. Leaving them there offered to answer a call already in
+                // progress.
+                // Reposted on every change so the mute action's label and icon
+                // follow the actual state; the screen is only brought forward
+                // when the call itself became active.
+                showOngoingCallNotification(state)
+                if (entered) openCallScreen(state)
+            }
+            CallSession.Phase.DIALING -> if (entered) openCallScreen(state)
+            CallSession.Phase.ENDED -> if (entered) {
+                clearCallNotification()
+                logCall(state)
+                // Otherwise the next call inherits the last one's mute, and the
+                // caller talks into a microphone they never switched off.
+                callMuted = false
+                callSpeaker = false
+            }
+            else -> if (entered) clearCallNotification()
+        }
+    }
+
+    /**
+     * Records the call in the conversation it belonged to.
+     *
+     * Without this a missed call leaves no trace at all: the ring stops, the
+     * notification is cleared, and there is nothing anywhere to say somebody
+     * tried to reach you. It is one row of the same kind the unread badge
+     * already counts, so a missed call reads as exactly one thing to look at.
+     */
+    private fun logCall(state: CallSession.State) {
+        if (state.peerBeaconId == 0) return
+
+        val connected = state.startedAt > 0
+        val seconds = if (connected) (System.currentTimeMillis() - state.startedAt) / 1000 else 0
+        val text = when {
+            connected -> String.format("\uD83D\uDCDE Call \u00B7 %d:%02d", seconds / 60, seconds % 60)
+            state.incoming && state.reason == CallProtocol.Reason.DECLINED -> "\uD83D\uDCDE Call declined"
+            state.incoming -> "\uD83D\uDCDE Missed call"
+            state.reason == CallProtocol.Reason.DECLINED -> "\uD83D\uDCDE Call declined"
+            state.reason == CallProtocol.Reason.BUSY -> "\uD83D\uDCDE Line busy"
+            state.reason == CallProtocol.Reason.UNANSWERED -> "\uD83D\uDCDE No answer"
+            else -> "\uD83D\uDCDE Call ended"
+        }
+
+        val peerRow = beaconIdToRow(state.peerBeaconId)
+        val localRow = beaconIdToRow(localBeaconId)
+        val missed = state.incoming && !connected &&
+            state.reason != CallProtocol.Reason.DECLINED
+
+        CoroutineScope(Dispatchers.IO).launch {
+            AppDatabase.getDatabase(this@RelayService).messageDao().insertMessage(
+                MessageEntity(
+                    messageId = "call-" + state.callId,
+                    senderId = if (state.incoming) peerRow else localRow,
+                    recipientId = if (state.incoming) localRow else peerRow,
+                    plaintext = text,
+                    envelopeData = ByteArray(0),
+                    timestamp = System.currentTimeMillis(),
+                    direction = if (state.incoming) "INBOUND" else "OUTBOUND",
+                    status = if (state.incoming) "RECEIVED" else "SENT",
+                    // A call you took is a call you have seen. Only a missed one
+                    // should leave a badge behind.
+                    isRead = !missed,
+                    messageType = MessageType.CALL
+                )
+            )
+            notifyMessageStored(state.peerBeaconId)
+        }
+
+        if (missed) showMessageNotification(state.peerBeaconId, text, isBroadcast = false)
+    }
+
+    /**
+     * Rings, and puts the call screen in front of whatever is showing.
+     *
+     * A full-screen intent is the only way to surface a call from the
+     * background on modern Android — a plain activity start is silently blocked.
+     * If the system will not grant it, the notification still arrives as a
+     * heads-up, so the call is answerable either way rather than lost.
+     */
+    private fun ringForIncomingCall(state: CallSession.State) {
+        val notification = Notification.Builder(this, CALL_CHANNEL_ID)
+            .setContentTitle("Incoming call")
+            .setContentText(displayNameFor(state.peerBeaconId))
+            .setSmallIcon(R.drawable.ic_call)
+            .setColor(android.graphics.Color.parseColor(NOTIFICATION_ACCENT))
+            .setCategory(Notification.CATEGORY_CALL)
+            .setOngoing(true)
+            .setFullScreenIntent(callScreenIntent(state), true)
+            .addAction(
+                Notification.Action.Builder(
+                    null, "Decline", callCommandIntent(ACTION_CALL_DECLINE)
+                ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    null, "Answer", callCommandIntent(ACTION_CALL_ACCEPT)
+                ).build()
+            )
+            .build()
+
+        getSystemService(NotificationManager::class.java)
+            .notify(CALL_NOTIFICATION_ID, notification)
+        openCallScreen(state)
+    }
+
+    /**
+     * The shade's version of the call screen.
+     *
+     * Answering from the notification bar leaves the phone wherever it was, so
+     * this has to be a usable call control in its own right, not a label: the
+     * timer says the call is live, and mute and end are reachable without ever
+     * opening the app. The chronometer is the platform's own — it counts up on
+     * its own clock, so the service does not post an update every second to
+     * keep it honest.
+     */
+    private fun showOngoingCallNotification(state: CallSession.State) {
+        val muteLabel = if (callMuted) "Unmute" else "Mute"
+        val notification = Notification.Builder(this, CALL_CHANNEL_ID)
+            .setContentTitle(displayNameFor(state.peerBeaconId))
+            .setContentText(if (callMuted) "Muted" else "Ongoing call")
+            .setSmallIcon(R.drawable.ic_call)
+            .setColor(android.graphics.Color.parseColor(NOTIFICATION_ACCENT))
+            .setCategory(Notification.CATEGORY_CALL)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(callScreenIntent(state))
+            .setUsesChronometer(true)
+            .setShowWhen(true)
+            .setWhen(state.startedAt)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(
+                        this,
+                        if (callMuted) R.drawable.ic_mic_off else R.drawable.ic_mic_on
+                    ),
+                    muteLabel,
+                    callCommandIntent(ACTION_CALL_MUTE, !callMuted)
+                ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_call_end),
+                    "End call",
+                    callCommandIntent(ACTION_CALL_HANGUP)
+                ).build()
+            )
+            .build()
+
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                .notify(CALL_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun callScreenIntent(state: CallSession.State): android.app.PendingIntent =
+        android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, CallActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra(CallActivity.EXTRA_PEER_ROW, beaconIdToRow(state.peerBeaconId))
+                putExtra(CallActivity.EXTRA_PEER_NAME, displayNameFor(state.peerBeaconId))
+            },
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+    private fun callCommandIntent(
+        action: String,
+        value: Boolean? = null
+    ): android.app.PendingIntent =
+        android.app.PendingIntent.getService(
+            // The value is part of the request code: two intents that differ
+            // only in an extra are "the same" to PendingIntent, so without this
+            // the mute action would keep firing whichever value it was first
+            // built with and the button would stop toggling.
+            this, action.hashCode() + (if (value == true) 1 else 0),
+            Intent(this, RelayService::class.java).setAction(action).apply {
+                value?.let { putExtra(EXTRA_CALL_ON, it) }
+            },
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
+    private fun openCallScreen(state: CallSession.State) {
+        runCatching { callScreenIntent(state).send() }
+            .onFailure { Log.w(TAG, "Could not open the call screen: ${it.message}") }
+    }
+
+    private fun clearCallNotification() {
+        runCatching {
+            getSystemService(NotificationManager::class.java).cancel(CALL_NOTIFICATION_ID)
         }
     }
 
@@ -500,10 +887,21 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             }
             ACTION_ANNOUNCE_PRESENCE -> announcePresence()
             ACTION_BLOCKLIST_CHANGED -> refreshBlockList()
-            ACTION_CALL_STATE -> setCallPriority(
-                active = intent.getBooleanExtra(EXTRA_CALL_ACTIVE, false),
-                peerBeaconId = intent.getIntExtra(EXTRA_BEACON_ID, 0)
-            )
+            ACTION_CALL_SYNC -> callSession?.let { onCallStateChanged(it.state) }
+            ACTION_CALL_DIAL -> dialCall(intent.getIntExtra(EXTRA_BEACON_ID, 0))
+            ACTION_CALL_ACCEPT -> callSession?.accept()
+            ACTION_CALL_DECLINE -> callSession?.decline()
+            ACTION_CALL_HANGUP -> callSession?.hangUp()
+            ACTION_CALL_MUTE -> {
+                callMuted = intent.getBooleanExtra(EXTRA_CALL_ON, false)
+                callSession?.setMuted(callMuted)
+                callSession?.let { onCallStateChanged(it.state) }
+            }
+            ACTION_CALL_SPEAKER -> {
+                callSpeaker = intent.getBooleanExtra(EXTRA_CALL_ON, false)
+                callSession?.setSpeaker(callSpeaker)
+                callSession?.let { onCallStateChanged(it.state) }
+            }
             ACTION_SEND_MEDIA -> {
                 val beaconId = intent.getIntExtra(EXTRA_BEACON_ID, 0)
                 val mediaId = intent.getStringExtra(EXTRA_MEDIA_ID)
@@ -551,6 +949,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
         super.onDestroy()
+        callSession?.shutdown(CallProtocol.Reason.LINK_LOST)
         runCatching { unregisterReceiver(bluetoothStateReceiver) }
         handler.removeCallbacksAndMessages(null)
         stopAdvertising()
@@ -603,7 +1002,9 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         handler.removeCallbacks(presenceRunnable)
         handler.removeCallbacks(maintenanceRunnable)
 
-        CallFeature.endAllCalls(this, "Bluetooth turned off")
+        // The signalling cannot reach the far side either, so this only ends
+        // the call here; their own media watchdog ends it there.
+        callSession?.shutdown(CallProtocol.Reason.LINK_LOST)
 
         stopScanning()
         stopAdvertising()
@@ -2096,11 +2497,13 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             handleGroupMessage(envelope, envelope.senderId.toInt())
             return
         }
-        // Call signalling is offered to the feature first. When it is disabled
-        // nothing is consumed and the payload falls through to be discarded as
-        // unrecognised, which is the correct behaviour for a build that cannot
-        // answer anyway.
-        if (CallFeature.handleIncomingPayload(envelope) { sender -> isBlocked(sender) }) return
+        // Call signalling never becomes a message. A build with calling
+        // disabled has no session, so this consumes and discards it, which is
+        // the right answer for a node that could not pick up anyway.
+        if (envelope.payloadType in CALL_PAYLOAD_TYPES) {
+            handleCallSignal(envelope)
+            return
+        }
 
         if (envelope.payloadType in MEDIA_PAYLOAD_TYPES) {
             val senderId = envelope.senderId.toInt()
@@ -2285,8 +2688,17 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     }
 
     override fun onPeerDisconnected(device: BluetoothDevice) {
+        val beaconId = peerManager.getConnectedPeers()
+            .firstOrNull { it.address == device.address }?.beaconId
         peerManager.removePeer(device.address)
         publishRoster()
+
+        // Only once the last link to that node is gone: a peer reachable at two
+        // addresses drops one of them routinely, and ending the call on that
+        // would hang up on someone who is still perfectly connected.
+        if (beaconId != null && !isDirectNeighbour(beaconId)) {
+            callSession?.onPeerLost(beaconId)
+        }
     }
 
     override fun onBeaconIdReceived(device: BluetoothDevice, beaconId: Int, sharedSecret: ByteArray) {
@@ -2364,6 +2776,31 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(relayChannel)
         manager.createNotificationChannel(messageChannel)
+
+        if (Features.VOICE_CALLS) {
+            // The ringtone belongs on the channel rather than the notification:
+            // after the channel exists its sound cannot be changed in code, and
+            // a call that arrives silently is a call that is missed.
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CALL_CHANNEL_ID, "MeshLink Calls", NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Incoming voice calls"
+                    setSound(
+                        android.media.RingtoneManager.getDefaultUri(
+                            android.media.RingtoneManager.TYPE_RINGTONE
+                        ),
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 700, 700)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+            )
+        }
     }
 
     private fun createNotification(bluetoothEnabled: Boolean = true): Notification =
