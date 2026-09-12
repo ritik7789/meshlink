@@ -611,6 +611,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sha2",
  "uniffi",
  "uuid",
  "x25519-dalek",

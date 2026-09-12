@@ -40,27 +40,23 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvEmptyState: TextView
     
     private lateinit var conversationAdapter: ConversationAdapter
-    private val connectedPeers = mutableMapOf<String, Int>()
+
+    /** Reachable mesh node id to its distance in hops, newest roster wins. */
+    private val reachableNodes = linkedMapOf<Long, Int>()
+    private val nodeNames = mutableMapOf<Long, String>()
+    private var localBeaconId: Int = 0
     
     private val db by lazy { AppDatabase.getDatabase(this) }
 
     private val serviceReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                RelayService.ACTION_PEER_CONNECTED -> {
-                    val address = intent.getStringExtra(RelayService.EXTRA_PEER_ADDRESS) ?: return
-                    val beaconId = intent.getIntExtra(RelayService.EXTRA_BEACON_ID, 0)
-                    connectedPeers[address] = beaconId
+                RelayService.ACTION_ROSTER_UPDATED -> {
+                    applyRoster(intent)
                     updateUI()
                 }
-                RelayService.ACTION_PEER_DISCONNECTED -> {
-                    val address = intent.getStringExtra(RelayService.EXTRA_PEER_ADDRESS) ?: return
-                    connectedPeers.remove(address)
-                    updateUI()
-                }
-                RelayService.ACTION_MESSAGE_RECEIVED -> {
-                    loadConversations()
-                }
+                RelayService.ACTION_MESSAGE_RECEIVED,
+                RelayService.ACTION_MESSAGE_SENT -> loadConversations()
             }
         }
     }
@@ -75,12 +71,8 @@ class MainActivity : AppCompatActivity() {
         btnBroadcast = findViewById(R.id.btnBroadcast)
 
         conversationAdapter = ConversationAdapter(
-            onConversationClick = { address, peerId ->
-                val intent = Intent(this, ChatActivity::class.java).apply {
-                    putExtra("peer_address", address)
-                    putExtra("peer_beacon_id", peerId)
-                }
-                startActivity(intent)
+            onConversationClick = { peerId ->
+                if (peerId != 0L) openChat(peerId)
             },
             onConversationLongClick = { peerId ->
                 showDeleteConversationDialog(peerId)
@@ -103,9 +95,9 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         val filter = IntentFilter().apply {
-            addAction(RelayService.ACTION_PEER_CONNECTED)
-            addAction(RelayService.ACTION_PEER_DISCONNECTED)
+            addAction(RelayService.ACTION_ROSTER_UPDATED)
             addAction(RelayService.ACTION_MESSAGE_RECEIVED)
+            addAction(RelayService.ACTION_MESSAGE_SENT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(serviceReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -115,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         
         if (hasCriticalPermissions()) {
             val syncIntent = Intent(this, RelayService::class.java).apply {
-                action = "SYNC_STATE"
+                action = RelayService.ACTION_SYNC_STATE
             }
             startService(syncIntent)
         }
@@ -167,10 +159,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Replaces the cached roster with the snapshot the relay service just sent. */
+    private fun applyRoster(intent: Intent) {
+        localBeaconId = intent.getIntExtra(RelayService.EXTRA_LOCAL_ID, localBeaconId)
+        val ids = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_IDS) ?: IntArray(0)
+        val hops = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_HOPS) ?: IntArray(0)
+        val names = intent.getStringArrayExtra(RelayService.EXTRA_ROSTER_NAMES) ?: emptyArray()
+
+        reachableNodes.clear()
+        nodeNames.clear()
+        ids.forEachIndexed { index, beaconId ->
+            val row = beaconIdToRow(beaconId)
+            reachableNodes[row] = hops.getOrElse(index) { 1 }
+            names.getOrNull(index)?.let { nodeNames[row] = it }
+        }
+    }
+
     private fun updateUI() {
-        tvStatus.text = "${connectedPeers.size} peers online"
-        conversationAdapter.setOnlinePeers(connectedPeers)
+        val direct = reachableNodes.count { it.value <= 1 }
+        val relayed = reachableNodes.size - direct
+        tvStatus.text = when {
+            reachableNodes.isEmpty() -> "No nodes reachable"
+            relayed == 0 -> "$direct node${if (direct == 1) "" else "s"} reachable"
+            else -> "${reachableNodes.size} nodes reachable ($direct direct, $relayed relayed)"
+        }
+        conversationAdapter.setReachableNodes(reachableNodes)
         loadConversations()
+    }
+
+    private fun openChat(peerId: Long) {
+        startActivity(Intent(this, ChatActivity::class.java).apply {
+            putExtra(ChatActivity.EXTRA_PEER_BEACON_ID, peerId)
+        })
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -194,8 +214,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSetUsernameDialog() {
         val input = EditText(this)
-        val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
-        input.setText(prefs.getString("username", ""))
+        val prefs = getSharedPreferences(RelayService.PREFS_NAME, MODE_PRIVATE)
+        input.setText(prefs.getString(RelayService.PREF_USERNAME, ""))
         input.hint = "Enter your username"
         
         AlertDialog.Builder(this)
@@ -204,11 +224,11 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Save") { _, _ ->
                 val text = input.text.toString().trim()
                 if (text.isNotBlank()) {
-                    prefs.edit().putString("username", text).apply()
-                    // Broadcast new username to all connected peers
+                    prefs.edit().putString(RelayService.PREF_USERNAME, text).apply()
+                    // The name travels in presence gossip, so re-announcing
+                    // pushes it to the whole mesh rather than only to neighbours.
                     val intent = Intent(this, RelayService::class.java).apply {
-                        action = "BROADCAST_MESSAGE"
-                        putExtra("message", "__SYS_NAME__:$text")
+                        action = RelayService.ACTION_ANNOUNCE_PRESENCE
                     }
                     startService(intent)
                     Toast.makeText(this, "Username updated", Toast.LENGTH_SHORT).show()
@@ -237,51 +257,50 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Offers every node the mesh can currently reach, not just direct
+     * neighbours, with its distance shown so relayed peers are identifiable.
+     */
     private fun showNewChatDialog() {
-        val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
-        val peerList = mutableListOf<Pair<String, Long>>() // name, beaconId
-        peerList.add(Pair("Broadcast to All", 0L))
-        
-        for ((address, beaconId) in connectedPeers) {
-            val username = prefs.getString("peer_name_$beaconId", "Node ${String.format("%04d", beaconId % 10000)}")
-            peerList.add(Pair(username!!, beaconId.toLong()))
+        val targets = mutableListOf<Pair<String, Long>>()
+        targets.add(Pair("Broadcast to All", 0L))
+
+        reachableNodes.entries
+            .sortedWith(compareBy({ it.value }, { it.key }))
+            .forEach { (peerId, hops) ->
+                val name = nodeNames[peerId] ?: defaultNodeName(rowToBeaconId(peerId))
+                val label = if (hops > 1) "$name — $hops hops away" else "$name — direct"
+                targets.add(Pair(label, peerId))
+            }
+
+        if (targets.size == 1) {
+            Toast.makeText(this, "No other nodes reachable yet", Toast.LENGTH_SHORT).show()
         }
 
-        val names = peerList.map { it.first }.toTypedArray()
-        
         AlertDialog.Builder(this)
             .setTitle("New Chat")
-            .setItems(names) { _, which ->
-                val selected = peerList[which]
-                if (selected.second == 0L) {
-                    // Broadcast
-                    val input = EditText(this)
-                    AlertDialog.Builder(this)
-                        .setTitle("Broadcast Message")
-                        .setView(input)
-                        .setPositiveButton("Send") { _, _ ->
-                            val text = input.text.toString()
-                            if (text.isNotBlank()) {
-                                val intent = Intent(this, RelayService::class.java).apply {
-                                    action = "BROADCAST_MESSAGE"
-                                    putExtra("message", text)
-                                }
-                                startService(intent)
-                                Toast.makeText(this, "Broadcast sent", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                        .setNegativeButton("Cancel", null)
-                        .show()
-                } else {
-                    // Chat with peer
-                    val address = connectedPeers.entries.find { it.value.toLong() == selected.second }?.key ?: ""
-                    val intent = Intent(this, ChatActivity::class.java).apply {
-                        putExtra("peer_address", address)
-                        putExtra("peer_beacon_id", selected.second)
-                    }
-                    startActivity(intent)
-                }
+            .setItems(targets.map { it.first }.toTypedArray()) { _, which ->
+                val (_, peerId) = targets[which]
+                if (peerId == 0L) showBroadcastDialog() else openChat(peerId)
             }
+            .show()
+    }
+
+    private fun showBroadcastDialog() {
+        val input = EditText(this)
+        AlertDialog.Builder(this)
+            .setTitle("Broadcast Message")
+            .setView(input)
+            .setPositiveButton("Send") { _, _ ->
+                val text = input.text.toString()
+                if (text.isBlank()) return@setPositiveButton
+                startService(Intent(this, RelayService::class.java).apply {
+                    action = RelayService.ACTION_BROADCAST_MESSAGE
+                    putExtra(RelayService.EXTRA_MESSAGE, text)
+                })
+                Toast.makeText(this, "Broadcast sent", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 

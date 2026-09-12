@@ -9,16 +9,26 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.meshlink.db.MessageEntity
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
+/**
+ * Conversation list. Peers are identified by their mesh beacon id rather than a
+ * BLE address, so a conversation stays addressable whether the node is a direct
+ * neighbour or several relays away.
+ */
 class ConversationAdapter(
-    private val onConversationClick: (String, Long) -> Unit,
+    private val onConversationClick: (Long) -> Unit,
     private val onConversationLongClick: (Long) -> Unit
 ) : RecyclerView.Adapter<ConversationAdapter.ViewHolder>() {
 
     private val conversations = mutableListOf<MessageEntity>()
     private val unreadCounts = mutableMapOf<Long, Int>()
-    private val onlinePeers = mutableMapOf<String, Int>()
+
+    /** Reachable node id to its distance in hops. Absent means unreachable. */
+    private val reachable = mutableMapOf<Long, Int>()
+
     private val dateFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
     private val dateFormatDate = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
 
@@ -29,11 +39,13 @@ class ConversationAdapter(
 
         return when {
             calTime.get(Calendar.YEAR) == calToday.get(Calendar.YEAR) &&
-            calTime.get(Calendar.DAY_OF_YEAR) == calToday.get(Calendar.DAY_OF_YEAR) -> dateFormat.format(Date(time))
-            
+                calTime.get(Calendar.DAY_OF_YEAR) == calToday.get(Calendar.DAY_OF_YEAR) ->
+                dateFormat.format(Date(time))
+
             calTime.get(Calendar.YEAR) == calYesterday.get(Calendar.YEAR) &&
-            calTime.get(Calendar.DAY_OF_YEAR) == calYesterday.get(Calendar.DAY_OF_YEAR) -> "Yesterday"
-            
+                calTime.get(Calendar.DAY_OF_YEAR) == calYesterday.get(Calendar.DAY_OF_YEAR) ->
+                "Yesterday"
+
             else -> dateFormatDate.format(Date(time))
         }
     }
@@ -48,23 +60,25 @@ class ConversationAdapter(
         unreadCounts[peerId] = count
         notifyDataSetChanged()
     }
-    
-    fun setOnlinePeers(peers: Map<String, Int>) {
-        onlinePeers.clear()
-        onlinePeers.putAll(peers)
+
+    fun setReachableNodes(nodes: Map<Long, Int>) {
+        reachable.clear()
+        reachable.putAll(nodes)
         notifyDataSetChanged()
     }
 
+    private fun peerIdOf(message: MessageEntity): Long =
+        if (message.direction == "OUTBOUND") message.recipientId else message.senderId
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val view = LayoutInflater.from(parent.context).inflate(R.layout.item_conversation, parent, false)
+        val view = LayoutInflater.from(parent.context)
+            .inflate(R.layout.item_conversation, parent, false)
         return ViewHolder(view)
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val lastMessage = conversations[position]
-        val peerId = if (lastMessage.direction == "OUTBOUND") lastMessage.recipientId else lastMessage.senderId
-        
-        holder.bind(lastMessage, peerId)
+        holder.bind(lastMessage, peerIdOf(lastMessage))
     }
 
     override fun getItemCount(): Int = conversations.size
@@ -79,38 +93,52 @@ class ConversationAdapter(
 
         init {
             itemView.setOnClickListener {
-                val lastMessage = conversations[adapterPosition]
-                val peerId = if (lastMessage.direction == "OUTBOUND") lastMessage.recipientId else lastMessage.senderId
-                val address = onlinePeers.entries.find { it.value.toLong() == peerId }?.key ?: ""
-                onConversationClick(address, peerId)
+                conversations.getOrNull(adapterPosition)?.let {
+                    onConversationClick(peerIdOf(it))
+                }
             }
             itemView.setOnLongClickListener {
-                val lastMessage = conversations[adapterPosition]
-                val peerId = if (lastMessage.direction == "OUTBOUND") lastMessage.recipientId else lastMessage.senderId
-                onConversationLongClick(peerId)
+                conversations.getOrNull(adapterPosition)?.let {
+                    onConversationLongClick(peerIdOf(it))
+                }
                 true
             }
         }
 
         fun bind(lastMessage: MessageEntity, peerId: Long) {
-            val peerStr = String.format("%04d", peerId % 10000)
-            val prefs = itemView.context.getSharedPreferences("MeshLinkPrefs", android.content.Context.MODE_PRIVATE)
-            val username = prefs.getString("peer_name_$peerId", "Node $peerStr")
-            tvPeerName.text = username
-            
-            val initial = username?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-            tvAvatar.text = initial
-            
-            // Randomish color based on peerId
-            val colors = arrayOf("#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB", "#64B5F6", "#4FC3F7", "#4DD0E1", "#4DB6AC", "#81C784")
+            val isBroadcastThread = lastMessage.isBroadcast && peerId == 0L
+            val prefs = itemView.context.getSharedPreferences(
+                RelayService.PREFS_NAME, android.content.Context.MODE_PRIVATE
+            )
+            val username = if (isBroadcastThread) {
+                "Broadcast"
+            } else {
+                prefs.getString("peer_name_$peerId", null)?.takeIf { it.isNotBlank() }
+                    ?: defaultNodeName(rowToBeaconId(peerId))
+            }
+
+            val hops = reachable[peerId]
+            tvPeerName.text = when {
+                isBroadcastThread -> username
+                // Surfacing the distance makes it obvious when a peer is being
+                // reached through relays rather than directly.
+                hops != null && hops > 1 -> "$username · $hops hops"
+                else -> username
+            }
+
+            tvAvatar.text = username.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+
+            val colors = arrayOf(
+                "#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB",
+                "#64B5F6", "#4FC3F7", "#4DD0E1", "#4DB6AC", "#81C784"
+            )
             val colorIndex = (peerId % colors.size).toInt()
-            val bg = tvAvatar.background as GradientDrawable
-            bg.setColor(Color.parseColor(colors[colorIndex]))
+            (tvAvatar.background as GradientDrawable).setColor(Color.parseColor(colors[colorIndex]))
 
             tvLastMessage.text = lastMessage.plaintext
             tvTimestamp.text = getRelativeDate(lastMessage.timestamp)
 
-            val isOnline = onlinePeers.values.contains(peerId.toInt())
+            val isOnline = isBroadcastThread || hops != null
             vOnlineStatus.backgroundTintList = android.content.res.ColorStateList.valueOf(
                 Color.parseColor(if (isOnline) "#4DCA59" else "#8E9BA7")
             )

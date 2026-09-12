@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Reserved recipient id meaning "every node in the mesh".
+pub const BROADCAST_RECIPIENT: u32 = 0;
+
+/// Hop budget a freshly created envelope starts with. Every relay decrements it
+/// before forwarding, so it bounds how far a message can travel and guarantees
+/// that flooding terminates even if the dedup cache is somehow bypassed.
+pub const INITIAL_TTL: u8 = 7;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, uniffi::Enum)]
 pub enum Priority {
     Sos = 0,
@@ -16,6 +24,10 @@ pub enum PayloadType {
     Ack,
     MediaOffer,
     Sos,
+    /// Node announcing itself to the whole mesh: carries its identity key, its
+    /// static X25519 key and its display name. Flooded like a broadcast, which
+    /// is what makes nodes visible to each other beyond one hop.
+    Presence,
     TopologyHint,
 }
 
@@ -28,9 +40,13 @@ pub struct MessageEnvelope {
     pub ttl: u8,
     pub timestamp: u32,
     pub payload_type: PayloadType,
-    // In a real scenario, this would be encrypted bytes (Vec<u8>)
-    pub encrypted_payload: String, 
-    // Ed25519 signature
+    /// For `Priority::Direct` this is `nonce || ciphertext` sealed with
+    /// `StaticKeyPair::seal` for `recipient_id` — relays forward it without
+    /// being able to read it. For mesh-wide traffic (broadcast, presence) there
+    /// is no single recipient key, so it carries plaintext bytes.
+    pub encrypted_payload: Vec<u8>,
+    /// Ed25519 signature over `serialize_for_signing`. Currently populated only
+    /// by senders that choose to sign; relays do not require it.
     pub signature: Vec<u8>,
 }
 
@@ -38,7 +54,7 @@ impl MessageEnvelope {
     pub fn new(
         sender_id: u32,
         recipient_id: u32,
-        payload: String,
+        payload: Vec<u8>,
         priority: Priority,
         payload_type: PayloadType,
         ttl: u8,
@@ -47,7 +63,7 @@ impl MessageEnvelope {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as u32;
-            
+
         Self {
             message_id: Uuid::new_v4().to_string(),
             sender_id,
@@ -61,24 +77,31 @@ impl MessageEnvelope {
         }
     }
 
-    pub fn new_direct(payload: String) -> Self {
-        Self::new(
-            12345,
-            67890,
-            payload,
-            Priority::Direct,
-            PayloadType::Text,
-            7,
-        )
+    /// Rebuilds an envelope that keeps an id assigned earlier. Used when a
+    /// message was queued before the recipient's key was known: the stored row
+    /// and the envelope that eventually goes out must agree on `message_id`, or
+    /// the sender's own copy and the delivered copy become different messages.
+    pub fn with_id(
+        message_id: String,
+        sender_id: u32,
+        recipient_id: u32,
+        payload: Vec<u8>,
+        priority: Priority,
+        payload_type: PayloadType,
+        ttl: u8,
+    ) -> Self {
+        let mut envelope = Self::new(sender_id, recipient_id, payload, priority, payload_type, ttl);
+        envelope.message_id = message_id;
+        envelope
     }
 
     pub fn serialize(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_default()
     }
 
+    /// Excludes `ttl` and `signature`: the TTL changes at every hop, so signing
+    /// over it would invalidate the signature the moment a relay forwards it.
     pub fn serialize_for_signing(&self) -> Vec<u8> {
-        // We can create a temporary struct to serialize without ttl and signature,
-        // or just clone, zero out ttl, clear signature, and serialize.
         #[derive(Serialize)]
         struct SigningPayload<'a> {
             message_id: &'a String,
@@ -87,7 +110,7 @@ impl MessageEnvelope {
             priority: &'a Priority,
             timestamp: u32,
             payload_type: &'a PayloadType,
-            encrypted_payload: &'a String,
+            encrypted_payload: &'a Vec<u8>,
         }
 
         let payload = SigningPayload {
@@ -113,5 +136,11 @@ impl MessageEnvelope {
         }
         self.ttl -= 1;
         self.ttl > 0
+    }
+
+    /// How many relays this envelope has already crossed. A direct neighbour's
+    /// message reports 1, a message relayed once reports 2, and so on.
+    pub fn hops_taken(&self) -> u8 {
+        INITIAL_TTL.saturating_sub(self.ttl).saturating_add(1)
     }
 }

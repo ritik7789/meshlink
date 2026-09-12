@@ -24,7 +24,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
+/**
+ * One conversation, addressed by the peer's mesh beacon id. The peer does not
+ * need to be a direct BLE neighbour: the relay service floods the message until
+ * it reaches that node.
+ */
 class ChatActivity : AppCompatActivity() {
+
+    companion object {
+        const val EXTRA_PEER_BEACON_ID = "peer_beacon_id"
+    }
 
     private lateinit var rvChat: RecyclerView
     private lateinit var etMessage: EditText
@@ -35,7 +44,6 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var btnBack: ImageButton
 
     private lateinit var chatAdapter: ChatAdapter
-    private var peerAddress: String = ""
     private var peerBeaconId: Long = 0
 
     private val db by lazy { AppDatabase.getDatabase(this) }
@@ -44,24 +52,14 @@ class ChatActivity : AppCompatActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 RelayService.ACTION_MESSAGE_RECEIVED -> {
-                    val address = intent.getStringExtra(RelayService.EXTRA_PEER_ADDRESS)
-                    val senderBeacon = intent.getIntExtra("extra_sender_beacon", -1)
-                    if (address == peerAddress || senderBeacon.toLong() == peerBeaconId) {
-                        loadMessages()
-                    }
+                    val senderBeacon = intent.getIntExtra(RelayService.EXTRA_SENDER_BEACON, 0)
+                    if (beaconIdToRow(senderBeacon) == peerBeaconId) loadMessages()
                 }
-                RelayService.ACTION_PEER_CONNECTED -> {
-                    val beaconId = intent.getIntExtra(RelayService.EXTRA_BEACON_ID, 0)
-                    if (beaconId.toLong() == peerBeaconId) {
-                        updateOnlineStatus(true)
-                    }
+                RelayService.ACTION_MESSAGE_SENT -> {
+                    val peer = intent.getIntExtra(RelayService.EXTRA_BEACON_ID, 0)
+                    if (beaconIdToRow(peer) == peerBeaconId) loadMessages()
                 }
-                RelayService.ACTION_PEER_DISCONNECTED -> {
-                    val address = intent.getStringExtra(RelayService.EXTRA_PEER_ADDRESS)
-                    if (address == peerAddress) {
-                        updateOnlineStatus(false)
-                    }
-                }
+                RelayService.ACTION_ROSTER_UPDATED -> applyRoster(intent)
             }
         }
     }
@@ -119,8 +117,7 @@ class ChatActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_chat)
 
-        peerAddress = intent.getStringExtra("peer_address") ?: ""
-        peerBeaconId = intent.getLongExtra("peer_beacon_id", 0)
+        peerBeaconId = intent.getLongExtra(EXTRA_PEER_BEACON_ID, 0)
 
         rvChat = findViewById(R.id.rvChat)
         etMessage = findViewById(R.id.etMessage)
@@ -130,15 +127,14 @@ class ChatActivity : AppCompatActivity() {
         vOnlineStatus = findViewById(R.id.vOnlineStatus)
         btnBack = findViewById(R.id.btnBack)
 
-        val peerStr = String.format("%04d", peerBeaconId % 10000)
-        val prefs = getSharedPreferences("MeshLinkPrefs", MODE_PRIVATE)
-        val username = prefs.getString("peer_name_$peerBeaconId", "Node $peerStr")
-        tvPeerName.text = username
+        val prefs = getSharedPreferences(RelayService.PREFS_NAME, MODE_PRIVATE)
+        tvPeerName.text = prefs.getString("peer_name_$peerBeaconId", null)?.takeIf { it.isNotBlank() }
+            ?: defaultNodeName(rowToBeaconId(peerBeaconId))
         tvBeaconId.text = "Beacon: $peerBeaconId"
-        
-        // Assume online initially if we opened from the list, though you could pass it in intent.
-        // It will update when broadcast received.
-        updateOnlineStatus(true) 
+
+        // Start pessimistic: the next roster broadcast says whether this node is
+        // actually reachable and how far away it is.
+        updateOnlineStatus(false)
         
         chatAdapter = ChatAdapter { message ->
             if (actionMode == null) {
@@ -170,14 +166,20 @@ class ChatActivity : AppCompatActivity() {
         super.onStart()
         val filter = IntentFilter().apply {
             addAction(RelayService.ACTION_MESSAGE_RECEIVED)
-            addAction(RelayService.ACTION_PEER_CONNECTED)
-            addAction(RelayService.ACTION_PEER_DISCONNECTED)
+            addAction(RelayService.ACTION_MESSAGE_SENT)
+            addAction(RelayService.ACTION_ROSTER_UPDATED)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(chatReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(chatReceiver, filter)
         }
+
+        // Ask for a roster snapshot so the header is correct on entry rather
+        // than only after the next periodic update.
+        startService(Intent(this, RelayService::class.java).apply {
+            action = RelayService.ACTION_SYNC_STATE
+        })
     }
 
     override fun onStop() {
@@ -201,34 +203,38 @@ class ChatActivity : AppCompatActivity() {
         val text = etMessage.text.toString().trim()
         if (text.isEmpty()) return
 
-        // Send to service
-        val intent = Intent(this, RelayService::class.java).apply {
-            action = "SEND_MESSAGE"
-            putExtra("address", peerAddress)
-            putExtra("message", text)
-        }
-        startService(intent)
+        // The relay service is the single writer for messages: it knows the real
+        // envelope id and whether the message actually left the device, and
+        // echoes ACTION_MESSAGE_SENT once the row is stored. Inserting a second
+        // copy here produced a duplicate that never matched the sent envelope.
+        startService(Intent(this, RelayService::class.java).apply {
+            action = RelayService.ACTION_SEND_MESSAGE
+            putExtra(RelayService.EXTRA_BEACON_ID, rowToBeaconId(peerBeaconId))
+            putExtra(RelayService.EXTRA_MESSAGE, text)
+        })
+        etMessage.text.clear()
+    }
 
-        // Save to DB locally for immediate feedback
-        val msg = MessageEntity(
-            messageId = UUID.randomUUID().toString(),
-            senderId = 0, // Local user
-            recipientId = peerBeaconId,
-            plaintext = text,
-            envelopeData = ByteArray(0),
-            timestamp = System.currentTimeMillis(),
-            direction = "OUTBOUND",
-            status = "PENDING_RELAY",
-            isBroadcast = false
-        )
+    /** Updates the header from the relay service's reachability snapshot. */
+    private fun applyRoster(intent: Intent) {
+        val ids = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_IDS) ?: IntArray(0)
+        val hops = intent.getIntArrayExtra(RelayService.EXTRA_ROSTER_HOPS) ?: IntArray(0)
+        val names = intent.getStringArrayExtra(RelayService.EXTRA_ROSTER_NAMES) ?: emptyArray()
 
-        CoroutineScope(Dispatchers.IO).launch {
-            db.messageDao().insertMessage(msg)
-            withContext(Dispatchers.Main) {
-                etMessage.text.clear()
-                loadMessages()
-            }
+        val index = ids.indexOfFirst { beaconIdToRow(it) == peerBeaconId }
+        if (index < 0) {
+            updateOnlineStatus(false)
+            tvBeaconId.text = "Beacon: $peerBeaconId · unreachable"
+            return
         }
+        names.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { tvPeerName.text = it }
+        val distance = hops.getOrElse(index) { 1 }
+        tvBeaconId.text = if (distance > 1) {
+            "Beacon: $peerBeaconId · $distance hops away"
+        } else {
+            "Beacon: $peerBeaconId · direct"
+        }
+        updateOnlineStatus(true)
     }
 
     private fun showDeleteDialog(message: MessageEntity) {

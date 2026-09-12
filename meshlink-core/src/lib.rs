@@ -12,7 +12,8 @@ pub use protocol::{protocol_version as core_protocol_version, is_protocol_compat
 pub use handshake::{generate_beacon_id as core_generate_beacon_id, HandshakeCache};
 pub use dedup::DedupCache;
 pub use router::{process_incoming, ProcessAction};
-pub use crypto::{IdentityKeyPair, EphemeralKeyPair, verify_signature, encrypt_transport, decrypt_transport};
+pub use crypto::{IdentityKeyPair, EphemeralKeyPair, StaticKeyPair, beacon_id_from_public_key,
+                 verify_signature, encrypt_transport, decrypt_transport};
 
 #[derive(Debug, uniffi::Error)]
 pub enum MeshError {
@@ -28,20 +29,62 @@ impl std::fmt::Display for MeshError {
 }
 impl std::error::Error for MeshError {}
 
+/// Hop budget every new envelope starts with, exposed so the Kotlin side can
+/// derive hop counts from a received envelope's remaining TTL.
 #[uniffi::export]
-pub fn create_test_envelope(text: String) -> MessageEnvelope {
-    MessageEnvelope::new_direct(text)
+pub fn initial_ttl() -> u8 {
+    envelope::INITIAL_TTL
+}
+
+/// Reserved recipient id meaning "every node in the mesh".
+#[uniffi::export]
+pub fn broadcast_recipient() -> u32 {
+    envelope::BROADCAST_RECIPIENT
+}
+
+/// Number of hops an envelope has already crossed: 1 for a direct neighbour,
+/// 2 for one that was relayed once, and so on.
+#[uniffi::export]
+pub fn envelope_hops(envelope: MessageEnvelope) -> u8 {
+    envelope.hops_taken()
 }
 
 #[uniffi::export]
 pub fn create_envelope(
     sender_id: u32,
     recipient_id: u32,
-    payload: String,
+    payload: Vec<u8>,
     priority: Priority,
     payload_type: PayloadType,
 ) -> MessageEnvelope {
-    MessageEnvelope::new(sender_id, recipient_id, payload, priority, payload_type, 7)
+    MessageEnvelope::new(
+        sender_id,
+        recipient_id,
+        payload,
+        priority,
+        payload_type,
+        envelope::INITIAL_TTL,
+    )
+}
+
+#[uniffi::export]
+pub fn create_envelope_with_id(
+    message_id: String,
+    sender_id: u32,
+    recipient_id: u32,
+    payload: Vec<u8>,
+    priority: Priority,
+    payload_type: PayloadType,
+) -> MessageEnvelope {
+    MessageEnvelope::with_id(
+        message_id,
+        sender_id,
+        recipient_id,
+        payload,
+        priority,
+        payload_type,
+        envelope::INITIAL_TTL,
+    )
 }
 
 #[uniffi::export]

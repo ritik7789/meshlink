@@ -4,14 +4,18 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 interface GattServerListener {
     fun onPeerConnected(device: BluetoothDevice)
@@ -20,6 +24,16 @@ interface GattServerListener {
     fun onMessageReceived(device: BluetoothDevice, data: ByteArray)
 }
 
+/**
+ * Peripheral side of the link. Besides accepting inbound connections it can now
+ * push data back out over indications, so a single BLE link carries traffic in
+ * both directions.
+ *
+ * That matters for relaying: previously every transmission went through
+ * [GattClient], so if a peer connected to us and our reciprocal outbound connect
+ * failed, we could receive from that peer but never send to it, and the relay
+ * chain died silently there.
+ */
 class GattServer(
     private val context: Context,
     private val bluetoothManager: BluetoothManager,
@@ -28,18 +42,32 @@ class GattServer(
 ) {
     companion object {
         private const val TAG = "GattServer"
-        val VERSION_CHAR_UUID = UUID.fromString("00001001-0000-1000-8000-00805F9B34FB")
-        val BEACON_CHAR_UUID = UUID.fromString("00001002-0000-1000-8000-00805F9B34FB")
-        val MESSAGE_CHAR_UUID = UUID.fromString("00001003-0000-1000-8000-00805F9B34FB")
-        val PROTOCOL_VERSION: Byte = 0x01
+        val VERSION_CHAR_UUID: UUID = UUID.fromString("00001001-0000-1000-8000-00805F9B34FB")
+        val BEACON_CHAR_UUID: UUID = UUID.fromString("00001002-0000-1000-8000-00805F9B34FB")
+        val MESSAGE_CHAR_UUID: UUID = UUID.fromString("00001003-0000-1000-8000-00805F9B34FB")
+
+        /** Standard Client Characteristic Configuration descriptor. */
+        val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
+
+        const val PROTOCOL_VERSION: Byte = 0x01
+
+        /** BLE's mandatory default until an MTU exchange raises it. */
+        private const val DEFAULT_MTU = 23
     }
 
     private var gattServer: BluetoothGattServer? = null
-    private val connectedDevices = mutableSetOf<BluetoothDevice>()
-    private val messageBuffer = mutableMapOf<String, ByteArray>()
-    private val serverPayloads = mutableMapOf<String, ByteArray>()
-    private val sharedSecrets = mutableMapOf<String, ByteArray>()
-    
+    private var messageCharacteristic: BluetoothGattCharacteristic? = null
+
+    private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
+    private val subscribedDevices = ConcurrentHashMap<String, Boolean>()
+    private val sharedSecrets = ConcurrentHashMap<String, ByteArray>()
+    private val serverPayloads = ConcurrentHashMap<String, ByteArray>()
+    private val mtus = ConcurrentHashMap<String, Int>()
+
+    private val reassembler = LinkCodec.Reassembler()
+    private val notifyQueues = ConcurrentHashMap<String, ConcurrentLinkedQueue<ByteArray>>()
+    private val notifyInProgress = ConcurrentHashMap<String, Boolean>()
+
     var localBeaconId: Int = 0
 
     @SuppressLint("MissingPermission")
@@ -54,7 +82,90 @@ class GattServer(
         gattServer?.close()
         gattServer = null
         connectedDevices.clear()
+        subscribedDevices.clear()
+        sharedSecrets.clear()
+        notifyQueues.clear()
+        notifyInProgress.clear()
         Log.i(TAG, "GATT Server stopped")
+    }
+
+    /** True when this peer can be reached over the server's indication path. */
+    fun canSendTo(address: String): Boolean =
+        connectedDevices.containsKey(address) &&
+            subscribedDevices[address] == true &&
+            sharedSecrets.containsKey(address)
+
+    /**
+     * Sends one envelope to a connected peer over indications. Returns false if
+     * the peer is not reachable this way, so the caller can fall back to the
+     * client path.
+     */
+    fun sendToDevice(address: String, envelopeBytes: ByteArray): Boolean {
+        val secret = sharedSecrets[address] ?: return false
+        if (!canSendTo(address)) return false
+
+        val chunks = LinkCodec.frame(secret, envelopeBytes, mtus[address] ?: DEFAULT_MTU)
+        if (chunks.isEmpty()) return false
+
+        val queue = notifyQueues.getOrPut(address) { ConcurrentLinkedQueue() }
+        // See GattClient.sendMessage: the append must be atomic or two messages'
+        // chunks interleave on the wire.
+        synchronized(queue) { queue.addAll(chunks) }
+        pumpNotifications(address)
+        return true
+    }
+
+    /**
+     * Sends the next queued chunk if no indication is already outstanding.
+     *
+     * Only one indication may be in flight per connection, and this runs both on
+     * sending threads and on the confirmation callback, so the slot claim and
+     * the dequeue happen together under one lock.
+     */
+    @SuppressLint("MissingPermission")
+    private fun pumpNotifications(address: String) {
+        val queue = notifyQueues[address] ?: return
+        val characteristic = messageCharacteristic
+        val device = connectedDevices[address]
+        if (characteristic == null || device == null) {
+            synchronized(queue) {
+                queue.clear()
+                notifyInProgress[address] = false
+            }
+            return
+        }
+
+        val chunk = synchronized(queue) {
+            if (notifyInProgress[address] == true) return
+            val next = queue.poll()
+            notifyInProgress[address] = next != null
+            next
+        } ?: return
+
+        val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gattServer?.notifyCharacteristicChanged(device, characteristic, true, chunk) ==
+                android.bluetooth.BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            characteristic.value = chunk
+            @Suppress("DEPRECATION")
+            gattServer?.notifyCharacteristicChanged(device, characteristic, true) == true
+        }
+
+        if (!ok) {
+            Log.w(TAG, "Indication to $address failed; dropping queued chunks")
+            completeNotification(address, keepQueue = false)
+        }
+    }
+
+    /** Releases the slot claimed by [pumpNotifications] and continues the queue. */
+    private fun completeNotification(address: String, keepQueue: Boolean) {
+        val queue = notifyQueues[address] ?: return
+        synchronized(queue) {
+            if (!keepQueue) queue.clear()
+            notifyInProgress[address] = false
+        }
+        if (keepQueue) pumpNotifications(address)
     }
 
     @SuppressLint("MissingPermission")
@@ -81,6 +192,15 @@ class GattServer(
             BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_INDICATE,
             BluetoothGattCharacteristic.PERMISSION_WRITE
         )
+        // Without this descriptor the INDICATE property is inert: a central has
+        // no way to subscribe, so the server-to-client direction never works.
+        messageChar.addDescriptor(
+            BluetoothGattDescriptor(
+                CCCD_UUID,
+                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+            )
+        )
+        messageCharacteristic = messageChar
 
         service.addCharacteristic(versionChar)
         service.addCharacteristic(beaconChar)
@@ -94,13 +214,60 @@ class GattServer(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.d(TAG, "Peer connected to server: ${device.address}")
-                connectedDevices.add(device)
+                connectedDevices[device.address] = device
+                mtus.putIfAbsent(device.address, DEFAULT_MTU)
                 listener.onPeerConnected(device)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.d(TAG, "Peer disconnected from server: ${device.address}")
-                connectedDevices.remove(device)
+                connectedDevices.remove(device.address)
+                subscribedDevices.remove(device.address)
+                sharedSecrets.remove(device.address)
+                serverPayloads.remove(device.address)
+                notifyQueues.remove(device.address)
+                notifyInProgress.remove(device.address)
+                reassembler.forget(device.address)
                 listener.onPeerDisconnected(device)
             }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            mtus[device.address] = mtu
+            Log.d(TAG, "Server MTU for ${device.address} is $mtu")
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "Indication to ${device.address} failed with status $status")
+            }
+            completeNotification(device.address, keepQueue = status == BluetoothGatt.GATT_SUCCESS)
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorWriteRequest(
+            device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
+            preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
+        ) {
+            if (descriptor.uuid == CCCD_UUID) {
+                val enabled = value != null && value.isNotEmpty() && value[0].toInt() != 0
+                subscribedDevices[device.address] = enabled
+                Log.d(TAG, "${device.address} ${if (enabled) "subscribed to" else "unsubscribed from"} indications")
+            }
+            if (responseNeeded) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorReadRequest(
+            device: BluetoothDevice, requestId: Int, offset: Int, descriptor: BluetoothGattDescriptor
+        ) {
+            val value = if (subscribedDevices[device.address] == true) {
+                BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            } else {
+                BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            }
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
         }
 
         @SuppressLint("MissingPermission")
@@ -114,7 +281,11 @@ class GattServer(
                 }
                 BEACON_CHAR_UUID -> {
                     val payloadBytes = serverPayloads[device.address] ?: ByteArray(0)
-                    val valueToSend = if (offset < payloadBytes.size) payloadBytes.copyOfRange(offset, payloadBytes.size) else ByteArray(0)
+                    val valueToSend = if (offset < payloadBytes.size) {
+                        payloadBytes.copyOfRange(offset, payloadBytes.size)
+                    } else {
+                        ByteArray(0)
+                    }
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, valueToSend)
                 }
                 else -> {
@@ -143,10 +314,12 @@ class GattServer(
                                 localBeaconId.toUInt(), identityKey, ephemeralKey
                             )
                             serverPayloads[device.address] = uniffi.meshlink_core.serializeHandshake(serverPayloadObj)
-                            
+
                             val sharedSecret = ephemeralKey.computeSharedSecret(clientPayload.ephemeralPubKey)
                             sharedSecrets[device.address] = sharedSecret
-                            
+                            // A new link secret invalidates anything half-received.
+                            reassembler.forget(device.address)
+
                             listener.onBeaconIdReceived(device, clientPayload.beaconId.toInt(), sharedSecret)
                         } else {
                             Log.w(TAG, "Failed to verify client handshake payload")
@@ -159,44 +332,9 @@ class GattServer(
                     }
                 }
                 MESSAGE_CHAR_UUID -> {
-                    if (value.size >= 2) {
-                        val chunkIndex = value[0].toInt() and 0xFF
-                        val totalChunks = value[1].toInt() and 0xFF
-                        val payload = value.copyOfRange(2, value.size)
-                        
-                        val buffer = messageBuffer[device.address] ?: ByteArray(0)
-                        val newBuffer = buffer + payload
-                        
-                        if (chunkIndex == totalChunks - 1) {
-                            val secret = sharedSecrets[device.address]
-                            if (secret != null && newBuffer.size >= 12) {
-                                try {
-                                    val nonce = newBuffer.copyOfRange(0, 12)
-                                    val ciphertext = newBuffer.copyOfRange(12, newBuffer.size)
-                                    val decrypted = uniffi.meshlink_core.decryptTransport(secret, nonce, ciphertext)
-                                    if (decrypted != null) {
-                                        listener.onMessageReceived(device, decrypted)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Failed to decrypt incoming message: ${e.message}")
-                                }
-                            }
-                            messageBuffer.remove(device.address)
-                        } else {
-                            messageBuffer[device.address] = newBuffer
-                        }
-                    } else {
-                        val secret = sharedSecrets[device.address]
-                        if (secret != null && value.size >= 12) {
-                            try {
-                                val nonce = value.copyOfRange(0, 12)
-                                val ciphertext = value.copyOfRange(12, value.size)
-                                val decrypted = uniffi.meshlink_core.decryptTransport(secret, nonce, ciphertext)
-                                if (decrypted != null) {
-                                    listener.onMessageReceived(device, decrypted)
-                                }
-                            } catch (e: Exception) {}
-                        }
+                    val envelope = reassembler.accept(device.address, value, sharedSecrets[device.address])
+                    if (envelope != null) {
+                        listener.onMessageReceived(device, envelope)
                     }
                     if (responseNeeded) {
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)

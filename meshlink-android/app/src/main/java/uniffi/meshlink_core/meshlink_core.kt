@@ -765,6 +765,24 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -832,11 +850,27 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_meshlink_core_fn_method_identitykeypair_to_bytes(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_meshlink_core_fn_clone_statickeypair(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_meshlink_core_fn_free_statickeypair(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_meshlink_core_fn_constructor_statickeypair_from_identity_seed(`seed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_meshlink_core_fn_method_statickeypair_open(`ptr`: Pointer,`peerPublicKey`: RustBuffer.ByValue,`sealed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_meshlink_core_fn_method_statickeypair_public_key(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_meshlink_core_fn_method_statickeypair_seal(`ptr`: Pointer,`peerPublicKey`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_meshlink_core_fn_func_beacon_id_from_public_key(`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    fun uniffi_meshlink_core_fn_func_broadcast_recipient(uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     fun uniffi_meshlink_core_fn_func_create_envelope(`senderId`: Int,`recipientId`: Int,`payload`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`payloadType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_meshlink_core_fn_func_create_handshake_payload(`beaconId`: Int,`identityKey`: Pointer,`ephemeralKey`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_meshlink_core_fn_func_create_envelope_with_id(`messageId`: RustBuffer.ByValue,`senderId`: Int,`recipientId`: Int,`payload`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`payloadType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_meshlink_core_fn_func_create_test_envelope(`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_meshlink_core_fn_func_create_handshake_payload(`beaconId`: Int,`identityKey`: Pointer,`ephemeralKey`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_meshlink_core_fn_func_decrement_ttl(`envelope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -848,8 +882,12 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_meshlink_core_fn_func_encrypt_transport(`key`: RustBuffer.ByValue,`nonce`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_meshlink_core_fn_func_envelope_hops(`envelope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     fun uniffi_meshlink_core_fn_func_generate_beacon_id(uniffi_out_err: UniffiRustCallStatus, 
     ): Int
+    fun uniffi_meshlink_core_fn_func_initial_ttl(uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     fun uniffi_meshlink_core_fn_func_is_protocol_compatible(`remoteVersion`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_meshlink_core_fn_func_process_incoming(`envelope`: RustBuffer.ByValue,`localId`: Int,`dedupCache`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -978,11 +1016,15 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_meshlink_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_meshlink_core_checksum_func_beacon_id_from_public_key(
+    ): Short
+    fun uniffi_meshlink_core_checksum_func_broadcast_recipient(
+    ): Short
     fun uniffi_meshlink_core_checksum_func_create_envelope(
     ): Short
-    fun uniffi_meshlink_core_checksum_func_create_handshake_payload(
+    fun uniffi_meshlink_core_checksum_func_create_envelope_with_id(
     ): Short
-    fun uniffi_meshlink_core_checksum_func_create_test_envelope(
+    fun uniffi_meshlink_core_checksum_func_create_handshake_payload(
     ): Short
     fun uniffi_meshlink_core_checksum_func_decrement_ttl(
     ): Short
@@ -994,7 +1036,11 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_meshlink_core_checksum_func_encrypt_transport(
     ): Short
+    fun uniffi_meshlink_core_checksum_func_envelope_hops(
+    ): Short
     fun uniffi_meshlink_core_checksum_func_generate_beacon_id(
+    ): Short
+    fun uniffi_meshlink_core_checksum_func_initial_ttl(
     ): Short
     fun uniffi_meshlink_core_checksum_func_is_protocol_compatible(
     ): Short
@@ -1034,6 +1080,12 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_meshlink_core_checksum_method_identitykeypair_to_bytes(
     ): Short
+    fun uniffi_meshlink_core_checksum_method_statickeypair_open(
+    ): Short
+    fun uniffi_meshlink_core_checksum_method_statickeypair_public_key(
+    ): Short
+    fun uniffi_meshlink_core_checksum_method_statickeypair_seal(
+    ): Short
     fun uniffi_meshlink_core_checksum_constructor_dedupcache_new(
     ): Short
     fun uniffi_meshlink_core_checksum_constructor_ephemeralkeypair_generate(
@@ -1043,6 +1095,8 @@ internal interface UniffiLib : Library {
     fun uniffi_meshlink_core_checksum_constructor_identitykeypair_from_bytes(
     ): Short
     fun uniffi_meshlink_core_checksum_constructor_identitykeypair_generate(
+    ): Short
+    fun uniffi_meshlink_core_checksum_constructor_statickeypair_from_identity_seed(
     ): Short
     fun ffi_meshlink_core_uniffi_contract_version(
     ): Int
@@ -1061,13 +1115,19 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_meshlink_core_checksum_func_create_envelope() != 23675.toShort()) {
+    if (lib.uniffi_meshlink_core_checksum_func_beacon_id_from_public_key() != 55885.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_func_broadcast_recipient() != 35799.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_func_create_envelope() != 24816.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_func_create_envelope_with_id() != 60253.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_meshlink_core_checksum_func_create_handshake_payload() != 31258.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_meshlink_core_checksum_func_create_test_envelope() != 41900.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_meshlink_core_checksum_func_decrement_ttl() != 27529.toShort()) {
@@ -1085,13 +1145,19 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_meshlink_core_checksum_func_encrypt_transport() != 59816.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_meshlink_core_checksum_func_envelope_hops() != 58230.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_meshlink_core_checksum_func_generate_beacon_id() != 4325.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_func_initial_ttl() != 30711.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_meshlink_core_checksum_func_is_protocol_compatible() != 26281.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_meshlink_core_checksum_func_process_incoming() != 5853.toShort()) {
+    if (lib.uniffi_meshlink_core_checksum_func_process_incoming() != 62532.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_meshlink_core_checksum_func_protocol_version() != 40822.toShort()) {
@@ -1145,6 +1211,15 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_meshlink_core_checksum_method_identitykeypair_to_bytes() != 57521.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_meshlink_core_checksum_method_statickeypair_open() != 62294.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_method_statickeypair_public_key() != 47867.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_method_statickeypair_seal() != 9950.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_meshlink_core_checksum_constructor_dedupcache_new() != 63705.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1158,6 +1233,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_meshlink_core_checksum_constructor_identitykeypair_generate() != 41415.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshlink_core_checksum_constructor_statickeypair_from_identity_seed() != 65105.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -2459,6 +2537,308 @@ public object FfiConverterTypeIdentityKeyPair: FfiConverter<IdentityKeyPair, Poi
 }
 
 
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * Long-lived X25519 keypair used for end-to-end encryption across relays.
+ */
+public interface StaticKeyPairInterface {
+    
+    /**
+     * Reverse of `seal`. Returns `None` if the payload was not sealed for us by
+     * the holder of `peer_public_key`, which also serves as implicit sender
+     * authentication: no relay can forge a payload that opens correctly.
+     */
+    fun `open`(`peerPublicKey`: kotlin.ByteArray, `sealed`: kotlin.ByteArray): kotlin.ByteArray?
+    
+    fun `publicKey`(): kotlin.ByteArray
+    
+    /**
+     * Encrypt `plaintext` so that only the holder of `peer_public_key` can read
+     * it. Relay nodes forward the result without being able to open it.
+     * Returns `nonce || ciphertext`, or an empty vec if the peer key is invalid.
+     */
+    fun `seal`(`peerPublicKey`: kotlin.ByteArray, `plaintext`: kotlin.ByteArray): kotlin.ByteArray
+    
+    companion object
+}
+
+/**
+ * Long-lived X25519 keypair used for end-to-end encryption across relays.
+ */
+open class StaticKeyPair: Disposable, AutoCloseable, StaticKeyPairInterface {
+
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    }
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+        override fun run() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_free_statickeypair(ptr, status)
+                }
+            }
+        }
+    }
+
+    fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall() { status ->
+            UniffiLib.INSTANCE.uniffi_meshlink_core_fn_clone_statickeypair(pointer!!, status)
+        }
+    }
+
+    
+    /**
+     * Reverse of `seal`. Returns `None` if the payload was not sealed for us by
+     * the holder of `peer_public_key`, which also serves as implicit sender
+     * authentication: no relay can forge a payload that opens correctly.
+     */override fun `open`(`peerPublicKey`: kotlin.ByteArray, `sealed`: kotlin.ByteArray): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_method_statickeypair_open(
+        it, FfiConverterByteArray.lower(`peerPublicKey`),FfiConverterByteArray.lower(`sealed`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `publicKey`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_method_statickeypair_public_key(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Encrypt `plaintext` so that only the holder of `peer_public_key` can read
+     * it. Relay nodes forward the result without being able to open it.
+     * Returns `nonce || ciphertext`, or an empty vec if the peer key is invalid.
+     */override fun `seal`(`peerPublicKey`: kotlin.ByteArray, `plaintext`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_method_statickeypair_seal(
+        it, FfiConverterByteArray.lower(`peerPublicKey`),FfiConverterByteArray.lower(`plaintext`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+    companion object {
+        
+    /**
+     * Derives the keypair from the same 32-byte seed that backs the node's
+     * Ed25519 identity, so both peers can recompute it after a restart.
+     */
+    @Throws(MeshException::class) fun `fromIdentitySeed`(`seed`: kotlin.ByteArray): StaticKeyPair {
+            return FfiConverterTypeStaticKeyPair.lift(
+    uniffiRustCallWithError(MeshException) { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_constructor_statickeypair_from_identity_seed(
+        FfiConverterByteArray.lower(`seed`),_status)
+}
+    )
+    }
+    
+
+        
+    }
+    
+}
+
+public object FfiConverterTypeStaticKeyPair: FfiConverter<StaticKeyPair, Pointer> {
+
+    override fun lower(value: StaticKeyPair): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): StaticKeyPair {
+        return StaticKeyPair(value)
+    }
+
+    override fun read(buf: ByteBuffer): StaticKeyPair {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: StaticKeyPair) = 8UL
+
+    override fun write(value: StaticKeyPair, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+}
+
+
 
 data class HandshakePayload (
     var `beaconId`: kotlin.UInt, 
@@ -2505,7 +2885,17 @@ data class MessageEnvelope (
     var `ttl`: kotlin.UByte, 
     var `timestamp`: kotlin.UInt, 
     var `payloadType`: PayloadType, 
-    var `encryptedPayload`: kotlin.String, 
+    /**
+     * For `Priority::Direct` this is `nonce || ciphertext` sealed with
+     * `StaticKeyPair::seal` for `recipient_id` — relays forward it without
+     * being able to read it. For mesh-wide traffic (broadcast, presence) there
+     * is no single recipient key, so it carries plaintext bytes.
+     */
+    var `encryptedPayload`: kotlin.ByteArray, 
+    /**
+     * Ed25519 signature over `serialize_for_signing`. Currently populated only
+     * by senders that choose to sign; relays do not require it.
+     */
     var `signature`: kotlin.ByteArray
 ) {
     
@@ -2522,7 +2912,7 @@ public object FfiConverterTypeMessageEnvelope: FfiConverterRustBuffer<MessageEnv
             FfiConverterUByte.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterTypePayloadType.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
         )
     }
@@ -2535,7 +2925,7 @@ public object FfiConverterTypeMessageEnvelope: FfiConverterRustBuffer<MessageEnv
             FfiConverterUByte.allocationSize(value.`ttl`) +
             FfiConverterUInt.allocationSize(value.`timestamp`) +
             FfiConverterTypePayloadType.allocationSize(value.`payloadType`) +
-            FfiConverterString.allocationSize(value.`encryptedPayload`) +
+            FfiConverterByteArray.allocationSize(value.`encryptedPayload`) +
             FfiConverterByteArray.allocationSize(value.`signature`)
     )
 
@@ -2547,7 +2937,7 @@ public object FfiConverterTypeMessageEnvelope: FfiConverterRustBuffer<MessageEnv
             FfiConverterUByte.write(value.`ttl`, buf)
             FfiConverterUInt.write(value.`timestamp`, buf)
             FfiConverterTypePayloadType.write(value.`payloadType`, buf)
-            FfiConverterString.write(value.`encryptedPayload`, buf)
+            FfiConverterByteArray.write(value.`encryptedPayload`, buf)
             FfiConverterByteArray.write(value.`signature`, buf)
     }
 }
@@ -2611,6 +3001,12 @@ enum class PayloadType {
     ACK,
     MEDIA_OFFER,
     SOS,
+    /**
+     * Node announcing itself to the whole mesh: carries its identity key, its
+     * static X25519 key and its display name. Flooded like a broadcast, which
+     * is what makes nodes visible to each other beyond one hop.
+     */
+    PRESENCE,
     TOPOLOGY_HINT;
     companion object
 }
@@ -2746,11 +3142,49 @@ public object FfiConverterOptionalTypeMessageEnvelope: FfiConverterRustBuffer<Me
             FfiConverterTypeMessageEnvelope.write(value, buf)
         }
     }
-} fun `createEnvelope`(`senderId`: kotlin.UInt, `recipientId`: kotlin.UInt, `payload`: kotlin.String, `priority`: Priority, `payloadType`: PayloadType): MessageEnvelope {
+}
+        /**
+         * Derive a node's mesh address from its Ed25519 identity public key.
+         *
+         * Because the identity key is persisted by the Android `KeyManager`, the
+         * resulting id is stable across service restarts — which is what lets
+         * conversation history, roster entries and cached display names survive a
+         * process death. Never returns 0, which is reserved for the broadcast address.
+         */ fun `beaconIdFromPublicKey`(`publicKey`: kotlin.ByteArray): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_beacon_id_from_public_key(
+        FfiConverterByteArray.lower(`publicKey`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Reserved recipient id meaning "every node in the mesh".
+         */ fun `broadcastRecipient`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_broadcast_recipient(
+        _status)
+}
+    )
+    }
+    
+ fun `createEnvelope`(`senderId`: kotlin.UInt, `recipientId`: kotlin.UInt, `payload`: kotlin.ByteArray, `priority`: Priority, `payloadType`: PayloadType): MessageEnvelope {
             return FfiConverterTypeMessageEnvelope.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_create_envelope(
-        FfiConverterUInt.lower(`senderId`),FfiConverterUInt.lower(`recipientId`),FfiConverterString.lower(`payload`),FfiConverterTypePriority.lower(`priority`),FfiConverterTypePayloadType.lower(`payloadType`),_status)
+        FfiConverterUInt.lower(`senderId`),FfiConverterUInt.lower(`recipientId`),FfiConverterByteArray.lower(`payload`),FfiConverterTypePriority.lower(`priority`),FfiConverterTypePayloadType.lower(`payloadType`),_status)
+}
+    )
+    }
+    
+ fun `createEnvelopeWithId`(`messageId`: kotlin.String, `senderId`: kotlin.UInt, `recipientId`: kotlin.UInt, `payload`: kotlin.ByteArray, `priority`: Priority, `payloadType`: PayloadType): MessageEnvelope {
+            return FfiConverterTypeMessageEnvelope.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_create_envelope_with_id(
+        FfiConverterString.lower(`messageId`),FfiConverterUInt.lower(`senderId`),FfiConverterUInt.lower(`recipientId`),FfiConverterByteArray.lower(`payload`),FfiConverterTypePriority.lower(`priority`),FfiConverterTypePayloadType.lower(`payloadType`),_status)
 }
     )
     }
@@ -2760,15 +3194,6 @@ public object FfiConverterOptionalTypeMessageEnvelope: FfiConverterRustBuffer<Me
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_create_handshake_payload(
         FfiConverterUInt.lower(`beaconId`),FfiConverterTypeIdentityKeyPair.lower(`identityKey`),FfiConverterTypeEphemeralKeyPair.lower(`ephemeralKey`),_status)
-}
-    )
-    }
-    
- fun `createTestEnvelope`(`text`: kotlin.String): MessageEnvelope {
-            return FfiConverterTypeMessageEnvelope.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_create_test_envelope(
-        FfiConverterString.lower(`text`),_status)
 }
     )
     }
@@ -2820,10 +3245,36 @@ public object FfiConverterOptionalTypeMessageEnvelope: FfiConverterRustBuffer<Me
     )
     }
     
+
+        /**
+         * Number of hops an envelope has already crossed: 1 for a direct neighbour,
+         * 2 for one that was relayed once, and so on.
+         */ fun `envelopeHops`(`envelope`: MessageEnvelope): kotlin.UByte {
+            return FfiConverterUByte.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_envelope_hops(
+        FfiConverterTypeMessageEnvelope.lower(`envelope`),_status)
+}
+    )
+    }
+    
  fun `generateBeaconId`(): kotlin.UInt {
             return FfiConverterUInt.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_generate_beacon_id(
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Hop budget every new envelope starts with, exposed so the Kotlin side can
+         * derive hop counts from a received envelope's remaining TTL.
+         */ fun `initialTtl`(): kotlin.UByte {
+            return FfiConverterUByte.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_initial_ttl(
         _status)
 }
     )
@@ -2838,7 +3289,20 @@ public object FfiConverterOptionalTypeMessageEnvelope: FfiConverterRustBuffer<Me
     )
     }
     
- fun `processIncoming`(`envelope`: MessageEnvelope, `localId`: kotlin.UInt, `dedupCache`: DedupCache): ProcessAction {
+
+        /**
+         * Decides what a node should do with an envelope that just arrived on a link.
+         *
+         * Routing is TTL-bounded flooding: a node forwards anything it has not seen
+         * before to every neighbour except the one it came from, until the hop budget
+         * runs out. There is no route table to go stale, so the mesh re-forms by
+         * itself whenever BLE links drop and re-establish.
+         *
+         * Loop termination rests on three checks, in order:
+         * 1. traffic we originated and that came back around is dropped,
+         * 2. anything already in the dedup cache is dropped,
+         * 3. anything out of TTL is not forwarded further.
+         */ fun `processIncoming`(`envelope`: MessageEnvelope, `localId`: kotlin.UInt, `dedupCache`: DedupCache): ProcessAction {
             return FfiConverterTypeProcessAction.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_meshlink_core_fn_func_process_incoming(
