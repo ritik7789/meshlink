@@ -126,6 +126,24 @@ class GattClient(
         reassembler.forget(address)
     }
 
+    /**
+     * Asks the stack for a faster connection interval on one link.
+     *
+     * High priority roughly triples the packet rate, which a real-time stream
+     * needs, at a real cost in power — so it is always paired with a return to
+     * balanced when the call ends.
+     */
+    @SuppressLint("MissingPermission")
+    fun setHighPriority(deviceAddress: String, high: Boolean) {
+        val gatt = connections[deviceAddress] ?: return
+        runCatching {
+            gatt.requestConnectionPriority(
+                if (high) BluetoothGatt.CONNECTION_PRIORITY_HIGH
+                else BluetoothGatt.CONNECTION_PRIORITY_BALANCED
+            )
+        }.onFailure { Log.w(TAG, "Connection priority change failed: ${it.message}") }
+    }
+
     /** True when we hold a live, handshaken outbound link to this peer. */
     fun canSendTo(address: String): Boolean =
         connections.containsKey(address) && sharedSecrets.containsKey(address)

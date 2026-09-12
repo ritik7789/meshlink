@@ -247,11 +247,7 @@ class GroupInfoActivity : AppCompatActivity() {
                     publishRoster(members.map { it.beaconRow }, next)
                 },
                 ThemedMenu.Item("Remove from group", R.drawable.ic_delete, "#F2685C") {
-                    confirm(
-                        "Remove $label?",
-                        "They stop receiving this group's messages, and the group key " +
-                            "is replaced so they cannot read anything sent afterwards."
-                    ) {
+                    confirm("Remove $label from the group?") {
                         publishRoster(
                             members.map { it.beaconRow }.filterNot { it == member.beaconRow },
                             admins - member.beaconRow
@@ -275,11 +271,7 @@ class GroupInfoActivity : AppCompatActivity() {
     // ── Destructive actions ─────────────────────────────────────────────────
 
     private fun confirmClearChat() {
-        confirm(
-            "Clear this chat?",
-            "The group's messages are removed from this device only. Everyone " +
-                "else keeps their copy, and you stay in the group."
-        ) {
+        confirm("Do you want to clear the chat?") {
             CoroutineScope(Dispatchers.IO).launch {
                 db.messageDao().clearGroupHistory(groupId)
                 withContext(Dispatchers.Main) {
@@ -291,11 +283,7 @@ class GroupInfoActivity : AppCompatActivity() {
     }
 
     private fun confirmLeave() {
-        confirm(
-            "Leave this group?",
-            "You stop receiving its messages. The conversation stays on this " +
-                "device unless you also clear it."
-        ) {
+        confirm("Do you want to leave the group?") {
             startService(Intent(this, RelayService::class.java).apply {
                 action = RelayService.ACTION_LEAVE_GROUP
                 putExtra(RelayService.EXTRA_GROUP_ID, groupId)
@@ -304,11 +292,15 @@ class GroupInfoActivity : AppCompatActivity() {
         }
     }
 
-    /** Every irreversible action passes through here first. */
-    private fun confirm(title: String, message: String, onYes: () -> Unit) {
+    /**
+     * Every irreversible action passes through here first.
+     *
+     * A short question only: spelling out the consequences turned each of these
+     * into a paragraph people stop reading, which defeats the point of asking.
+     */
+    private fun confirm(title: String, onYes: () -> Unit) {
         AlertDialog.Builder(this)
             .setTitle(title)
-            .setMessage(message)
             .setPositiveButton("Yes") { _, _ -> onYes() }
             .setNegativeButton("No", null)
             .show()

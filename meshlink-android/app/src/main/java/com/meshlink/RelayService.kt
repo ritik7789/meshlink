@@ -20,12 +20,14 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Base64
 import android.util.Log
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import com.meshlink.db.AppDatabase
@@ -85,6 +87,10 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
         /** Sent by the UI after the block list changes, to refresh the filter. */
         const val ACTION_BLOCKLIST_CHANGED = "BLOCKLIST_CHANGED"
+
+        /** Raised and lowered around a live call, to give it the radio. */
+        const val ACTION_CALL_STATE = "CALL_STATE"
+        const val EXTRA_CALL_ACTIVE = "extra_call_active"
 
         /** Start offering a local file to a peer. */
         const val ACTION_SEND_MEDIA = "SEND_MEDIA"
@@ -281,7 +287,7 @@ class RelayService : Service(), GattServerListener, GattClientListener {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
-        startForeground(NOTIFICATION_ID, createNotification())
+        enterForeground(withMicrophone = false)
 
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
@@ -394,6 +400,55 @@ class RelayService : Service(), GattServerListener, GattClientListener {
 
     private fun isBlocked(beaconId: Int): Boolean = blockedNodes.contains(beaconId)
 
+    /** True while a call holds the radio; consulted before any bulk transfer. */
+    @Volatile
+    private var callInProgress = false
+
+    /**
+     * Gives a live call priority over the mesh's routine work.
+     *
+     * Voice is the one thing here with a hard latency budget, and the periodic
+     * housekeeping is what breaks it: the scan cycle stops scanning for a full
+     * second every fifteen, and presence floods every twenty. Both are
+     * suspended for the duration, along with the sweeps, and the link carrying
+     * the audio is asked for a faster connection interval.
+     *
+     * Advertising is deliberately left running: it is cheap, and going invisible
+     * mid-call would stop others finding this node for no gain.
+     */
+    @SuppressLint("MissingPermission")
+    private fun setCallPriority(active: Boolean, peerBeaconId: Int) {
+        // Guarded here too, so the whole prioritisation path folds away with the
+        // feature rather than lingering as an unreachable handler.
+        if (!Features.VOICE_CALLS) return
+        if (callInProgress == active) return
+        callInProgress = active
+
+        if (active) {
+            enterForeground(withMicrophone = true)
+            handler.removeCallbacks(scanRestartRunnable)
+            handler.removeCallbacks(presenceRunnable)
+            handler.removeCallbacks(maintenanceRunnable)
+            stopScanning()
+            peerAddresses(peerBeaconId).forEach { gattClient.setHighPriority(it, true) }
+            Log.i(TAG, "Call active: mesh housekeeping suspended for $peerBeaconId")
+        } else {
+            enterForeground(withMicrophone = false)
+            peerAddresses(peerBeaconId).forEach { gattClient.setHighPriority(it, false) }
+            if (isBluetoothEnabled() && meshRunning) {
+                startScanning()
+                handler.postDelayed(scanRestartRunnable, SCAN_CYCLE_MS)
+                handler.postDelayed(presenceRunnable, PRESENCE_INTERVAL_MS)
+                handler.postDelayed(maintenanceRunnable, MAINTENANCE_INTERVAL_MS)
+            }
+            Log.i(TAG, "Call ended: mesh housekeeping resumed")
+        }
+    }
+
+    /** Every BLE address a node is currently reachable at. */
+    private fun peerAddresses(beaconId: Int): List<String> =
+        peerManager.getConnectedPeers().filter { it.beaconId == beaconId }.map { it.address }
+
     private fun rememberNodeKey(beaconId: Int, staticKey: ByteArray, identityKey: ByteArray?) {
         peerManager.rememberStaticKey(beaconId, staticKey)
         val editor = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
@@ -445,6 +500,10 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             }
             ACTION_ANNOUNCE_PRESENCE -> announcePresence()
             ACTION_BLOCKLIST_CHANGED -> refreshBlockList()
+            ACTION_CALL_STATE -> setCallPriority(
+                active = intent.getBooleanExtra(EXTRA_CALL_ACTIVE, false),
+                peerBeaconId = intent.getIntExtra(EXTRA_BEACON_ID, 0)
+            )
             ACTION_SEND_MEDIA -> {
                 val beaconId = intent.getIntExtra(EXTRA_BEACON_ID, 0)
                 val mediaId = intent.getStringExtra(EXTRA_MEDIA_ID)
@@ -543,6 +602,8 @@ class RelayService : Service(), GattServerListener, GattClientListener {
         handler.removeCallbacks(scanRestartRunnable)
         handler.removeCallbacks(presenceRunnable)
         handler.removeCallbacks(maintenanceRunnable)
+
+        CallFeature.endAllCalls(this, "Bluetooth turned off")
 
         stopScanning()
         stopAdvertising()
@@ -1317,6 +1378,12 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             val overHops = emergencyTransfers[mediaId] == true
             var offset = fromOffset
             while (offset < file.length()) {
+                if (callInProgress) {
+                    // A transfer resumes from its offset; a call cannot recover
+                    // the seconds it loses competing for the same radio.
+                    Log.i(TAG, "Pausing $mediaId at $offset for a call in progress")
+                    return@launch
+                }
                 if (!overHops && !isDirectNeighbour(beaconId)) {
                     Log.w(TAG, "Peer $beaconId is no longer direct; pausing $mediaId at $offset")
                     return@launch
@@ -2029,6 +2096,12 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             handleGroupMessage(envelope, envelope.senderId.toInt())
             return
         }
+        // Call signalling is offered to the feature first. When it is disabled
+        // nothing is consumed and the payload falls through to be discarded as
+        // unrecognised, which is the correct behaviour for a build that cannot
+        // answer anyway.
+        if (CallFeature.handleIncomingPayload(envelope) { sender -> isBlocked(sender) }) return
+
         if (envelope.payloadType in MEDIA_PAYLOAD_TYPES) {
             val senderId = envelope.senderId.toInt()
             if (!isBlocked(senderId)) handleMediaPayload(envelope, senderId)
@@ -2305,8 +2378,57 @@ class RelayService : Service(), GattServerListener, GattClientListener {
             .build()
 
     private fun updateNotification(bluetoothEnabled: Boolean) {
+        notificationShowsEnabled = bluetoothEnabled
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, createNotification(bluetoothEnabled))
+    }
+
+    /** What the ongoing notification currently says, so re-entering keeps it. */
+    @Volatile
+    private var notificationShowsEnabled = true
+
+    /**
+     * Enters the foreground with an explicit service type, and returns whether
+     * the microphone type was granted.
+     *
+     * The type must be named here rather than left to the manifest. Given no
+     * argument, Android 14+ resolves the type to the *union* of everything the
+     * manifest declares and then demands the prerequisite permission for each
+     * one. Declaring `microphone` there is what lets a call use it later, but
+     * the union made it a condition of starting at all: the mesh service comes
+     * up when the app launches, long before any call, so it died in `onCreate`
+     * with `SecurityException: Starting FGS with type microphone` on every
+     * single launch — the relay, not just calling, taken down by a permission
+     * the user is deliberately not asked for until they place a call.
+     *
+     * So the microphone is added only for the span of a call, and only once
+     * RECORD_AUDIO is actually held. If the system still refuses it the call
+     * loses its audio type but the mesh keeps running: a rejected upgrade must
+     * never be able to kill the relay, which is the mistake being fixed here.
+     */
+    private fun enterForeground(withMicrophone: Boolean): Boolean {
+        val base = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        val notification = createNotification(notificationShowsEnabled)
+
+        // CallFeature reports false whenever calling is disabled, so a build
+        // with the feature off never asks for the type at all.
+        if (!withMicrophone || !CallFeature.hasMicrophonePermission(this)) {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, base)
+            return false
+        }
+
+        return runCatching {
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, notification,
+                base or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Microphone foreground type refused: ${error.message}")
+            runCatching {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, base)
+            }
+        }.isSuccess
     }
 
     /** The launcher icon, shown alongside the notification so it reads as this app. */

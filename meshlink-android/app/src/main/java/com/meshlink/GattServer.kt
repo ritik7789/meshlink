@@ -209,6 +209,10 @@ class GattServer(
         )
         messageCharacteristic = messageChar
 
+        // Voice needs its own unreliable channel rather than sharing the
+        // message characteristic, which retries and reassembles.
+        CallFeature.registerTransport(service)
+
         service.addCharacteristic(versionChar)
         service.addCharacteristic(beaconChar)
         service.addCharacteristic(messageChar)

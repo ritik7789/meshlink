@@ -10,6 +10,13 @@
     <!-- Needed for Wi-Fi Direct (Media Handoff) -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
     
+    <!-- Voice calling. RECORD_AUDIO is a runtime permission; the microphone
+         foreground-service type is mandatory from Android 14, and recording
+         from a service without it throws rather than failing quietly. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <!-- Required for foreground service and notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -37,7 +44,7 @@
         <activity android:name=".GroupInfoActivity" />
         
         <!-- Foreground service for background relay (NFR-3.1.2) -->
-        <service android:name=".RelayService" android:foregroundServiceType="connectedDevice|location" />
+        <service android:name=".RelayService" android:foregroundServiceType="connectedDevice|location|microphone" />
 
         <!-- Grants a viewer app temporary access to one attachment, without
              exposing app-private storage to anything else. -->

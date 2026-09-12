@@ -101,8 +101,15 @@ class ChatActivity : AppCompatActivity() {
                     if (beaconIdToRow(senderBeacon) == peerBeaconId) loadMessages()
                 }
                 RelayService.ACTION_MESSAGE_SENT -> {
+                    val group = groupId
+                    val changedGroup = intent.getStringExtra(RelayService.EXTRA_GROUP_ID)
                     val peer = intent.getIntExtra(RelayService.EXTRA_BEACON_ID, 0)
-                    if (beaconIdToRow(peer) == peerBeaconId) loadMessages()
+                    val relevant = if (group != null) {
+                        changedGroup == group
+                    } else {
+                        beaconIdToRow(peer) == peerBeaconId
+                    }
+                    if (relevant) loadMessages()
                 }
                 RelayService.ACTION_EMERGENCY_REFUSED ->
                     Toast.makeText(
@@ -264,6 +271,15 @@ class ChatActivity : AppCompatActivity() {
         btnSend.setOnClickListener { sendMessage() }
         btnAttach.setOnClickListener { showAttachmentOptions() }
 
+        // Adds a call button only when the feature is compiled in; the façade
+        // decides, so this screen needs no flag check of its own.
+        CallFeature.attachCallAction(
+            activity = this,
+            header = findViewById(R.id.chatHeader),
+            peerBeaconId = rowToBeaconId(peerBeaconId),
+            isGroup = groupId != null
+        )
+
         UiMotion.attachPressFeedback(btnSend)
         UiMotion.attachPressFeedback(btnAttach)
         UiMotion.attachPressFeedback(btnBack)
@@ -298,11 +314,26 @@ class ChatActivity : AppCompatActivity() {
         startService(Intent(this, RelayService::class.java).apply {
             action = RelayService.ACTION_SYNC_STATE
         })
+
+        // Re-read on every entry, not just on creation. Returning from the group
+        // info page after clearing the chat previously showed the adapter's stale
+        // copy, because this screen is not recreated and nothing told it the rows
+        // had gone.
+        loadMessages()
     }
 
     override fun onStop() {
         super.onStop()
         unregisterReceiver(chatReceiver)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        CallFeature.onPermissionResult(this, requestCode, grantResults)
     }
 
     @Suppress("DEPRECATION")
